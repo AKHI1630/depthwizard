@@ -20,6 +20,11 @@ Fixed to `C:\Users\rtadi001\ClaudeAI\depthwizard`. Do not create or reference fi
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
+## Environment constraints
+- This machine has no `OES_texture_float` support — WebGL clamps float textures to 0, producing a flat terrain.
+- All height data **must** travel as RG-packed 16-bit in an `RGBA / UnsignedByteType` texture with `NearestFilter` on both min and mag. Never reintroduce `FloatType` or `RedFormat` textures.
+- Before presenting on any demo machine, verify float texture support with `gl.getExtension('OES_texture_float')` and confirm it is non-null.
+
 ## Conventions
 - Python venv at `.venv/`
 - Static frontend at `static/`
