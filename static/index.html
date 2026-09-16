@@ -39,10 +39,18 @@
     <input type="range" id="ve-slider" min="0.1" max="10" step="0.1" value="2.0">
   </div>
   <div class="row">
+    <label>Estimator</label>
+    <select id="estimator-select" style="width:100%;background:#1a1a2e;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:4px 6px;font-size:12px;">
+      <option value="depth" selected>Depth-Anything-V2-Small</option>
+      <option value="synthetic">Synthetic (debug)</option>
+    </select>
+  </div>
+  <div class="row">
     <label for="file-btn">Upload Image</label>
     <div id="file-btn" onclick="document.getElementById('file-input').click()">Choose file…</div>
     <input type="file" id="file-input" accept="image/*">
   </div>
+  <div id="warning" style="display:none;font-size:11px;color:#f4a261;margin-top:6px;"></div>
   <div id="status">Ready — orbit: left drag · zoom: scroll · pan: right drag</div>
 </div>
 
@@ -200,11 +208,12 @@ document.getElementById('file-input').addEventListener('change', async () => {
   const status = document.getElementById('status');
   status.textContent = 'Uploading…';
 
+  const estimator = document.getElementById('estimator-select').value;
   const formData = new FormData();
   formData.append('file', file);
 
   try {
-    const resp = await fetch('/upload', { method: 'POST', body: formData });
+    const resp = await fetch(`/upload?estimator=${estimator}`, { method: 'POST', body: formData });
     if (!resp.ok) { status.textContent = 'Server error: ' + resp.status; return; }
 
     const buf = await resp.arrayBuffer();
@@ -240,6 +249,16 @@ document.getElementById('file-input').addEventListener('change', async () => {
       console.warn('[DepthWizard] *** min===max — data is flat; bug is backend or parsing ***');
     } else {
       console.log('[DepthWizard] data has height variation — proceeding to pack texture');
+    }
+
+    // Surface backend fallback warning in UI
+    const warningEl = document.getElementById('warning');
+    if (meta.warning) {
+      warningEl.textContent = '⚠ ' + meta.warning;
+      warningEl.style.display = 'block';
+      console.warn('[DepthWizard] backend warning:', meta.warning);
+    } else {
+      warningEl.style.display = 'none';
     }
 
     // Pack normalised height into RG channels of a Uint8 RGBA texture.

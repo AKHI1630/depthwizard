@@ -3,3 +3,11 @@ uvicorn==0.53.0
 numpy==2.5.3
 pillow==12.3.0
 python-multipart==0.0.32
+
+# Depth-Anything-V2-Small — CPU only
+# Install torch with: pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch==2.14.0+cpu
+transformers==5.17.0
+accelerate==1.15.0
+safetensors==0.8.0
+huggingface_hub==1.31.0
