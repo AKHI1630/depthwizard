@@ -214,6 +214,11 @@ document.getElementById('file-input').addEventListener('change', async () => {
 
   try {
     const resp = await fetch(`/upload?estimator=${estimator}`, { method: 'POST', body: formData });
+    if (resp.status === 503) {
+      const err = await resp.json().catch(() => ({}));
+      status.textContent = err.detail || 'Model still loading — try again in a moment.';
+      return;
+    }
     if (!resp.ok) { status.textContent = 'Server error: ' + resp.status; return; }
 
     const buf = await resp.arrayBuffer();

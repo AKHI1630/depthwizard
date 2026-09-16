@@ -1,11 +1,13 @@
 import json
 import logging
 import struct
+import threading
+from enum import Enum
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, File, Query, UploadFile
-from fastapi.responses import Response
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .estimators.base import HeightEstimator
@@ -18,57 +20,85 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 app = FastAPI(title="DepthWizard")
 
-# ── Estimator registry ────────────────────────────────────────────────────────
+
+# ── Model state ───────────────────────────────────────────────────────────────
+class ModelStatus(str, Enum):
+    LOADING = "loading"
+    READY   = "ready"
+    FAILED  = "failed"
+
+
 _synthetic = SyntheticEstimator()
 _depth_anything: HeightEstimator | None = None
-_depth_anything_failed = False
-_fallback_reason: str = ""
+_model_status: ModelStatus = ModelStatus.LOADING
+_model_error: str = ""
+
 
 def _load_depth_anything() -> None:
-    global _depth_anything, _depth_anything_failed, _fallback_reason
+    global _depth_anything, _model_status, _model_error
     try:
         from .estimators.depth_anything import DepthAnythingEstimator
         _depth_anything = DepthAnythingEstimator()
+        _model_status = ModelStatus.READY
+        logger.info("=" * 60)
+        logger.info("DepthWizard ready — Depth-Anything-V2-Small loaded, accepting requests.")
+        logger.info("=" * 60)
     except Exception as exc:
-        _depth_anything_failed = True
-        _fallback_reason = str(exc)
-        logger.error(
-            "=" * 60 + "\n"
-            "DEPTH-ANYTHING FAILED TO LOAD — falling back to synthetic.\n"
-            "Reason: %s\n" + "=" * 60,
-            exc,
-        )
+        _model_status = ModelStatus.FAILED
+        _model_error = str(exc)
+        logger.error("=" * 60)
+        logger.error("Depth-Anything failed to load — /upload will fall back to synthetic.")
+        logger.error("Reason: %s", exc)
+        logger.error("=" * 60)
 
 
 @app.on_event("startup")
-async def startup():
-    _load_depth_anything()
+async def startup() -> None:
+    t = threading.Thread(target=_load_depth_anything, name="model-loader", daemon=True)
+    t.start()
+    logger.info("Server ready. Model loading in background — watch for the 'DepthWizard ready' line.")
 
 
-def _pick_estimator(name: str) -> tuple[HeightEstimator, bool, str]:
-    """Return (estimator, is_fallback, warning_message)."""
+# ── Estimator selection ───────────────────────────────────────────────────────
+def _pick_estimator(name: str) -> tuple[HeightEstimator, str]:
+    """Return (estimator, warning).  Raises HTTPException 503 if model not ready yet."""
     if name == "synthetic":
-        return _synthetic, False, ""
-    # name == "depth" (default)
-    if _depth_anything is not None:
-        return _depth_anything, False, ""
-    return _synthetic, True, f"depth-anything unavailable ({_fallback_reason}); using synthetic"
+        return _synthetic, ""
+
+    if _model_status is ModelStatus.LOADING:
+        raise HTTPException(
+            status_code=503,
+            detail="Model still loading — please try again in a moment.",
+        )
+    if _model_status is ModelStatus.FAILED:
+        return _synthetic, f"Depth-Anything failed to load ({_model_error}); using synthetic instead."
+    return _depth_anything, ""  # type: ignore[return-value]
 
 
-# ── Upload endpoint ───────────────────────────────────────────────────────────
+# ── /health ───────────────────────────────────────────────────────────────────
+@app.get("/health")
+async def health() -> JSONResponse:
+    body = {"model_status": _model_status.value}
+    if _model_error:
+        body["model_error"] = _model_error
+    status_code = 200 if _model_status is ModelStatus.READY else 503
+    return JSONResponse(content=body, status_code=status_code)
+
+
+# ── /upload ───────────────────────────────────────────────────────────────────
 @app.post("/upload")
 async def upload(
     file: UploadFile = File(...),
     estimator: Literal["depth", "synthetic"] = Query(default="depth"),
-):
+) -> Response:
+    est, warning = _pick_estimator(estimator)
     image_bytes = await file.read()
-    est, is_fallback, warning = _pick_estimator(estimator)
     height_array, meta = est.estimate(image_bytes)
 
     meta_dict = meta.to_dict()
-    if is_fallback:
+    if warning:
         meta_dict["warning"] = warning
-        logger.warning("Serving fallback: %s", warning)
+        logger.warning("Fallback active: %s", warning)
 
     meta_bytes = json.dumps(meta_dict).encode("utf-8")
     prefix = struct.pack("<I", len(meta_bytes))
