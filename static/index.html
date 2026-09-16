@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DepthWizard — 3D Flythrough</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a12; color: #e0e0e0; font-family: Arial, sans-serif; overflow: hidden; }
+  #canvas-container { width: 100vw; height: 100vh; }
+
+  #ui {
+    position: fixed; top: 16px; left: 16px; z-index: 10;
+    background: rgba(10,10,20,0.82); border: 1px solid #333;
+    border-radius: 8px; padding: 14px 18px; min-width: 220px;
+    backdrop-filter: blur(6px);
+  }
+  #ui h1 { font-size: 15px; font-weight: bold; color: #7ec8e3; margin-bottom: 12px; letter-spacing: 0.05em; }
+  label { display: block; font-size: 12px; color: #aaa; margin-bottom: 3px; }
+  input[type=range] { width: 100%; accent-color: #7ec8e3; }
+  #ve-value { font-size: 12px; color: #7ec8e3; float: right; }
+  .row { margin-bottom: 12px; }
+
+  #file-btn {
+    display: inline-block; cursor: pointer; background: #1e3a5f;
+    border: 1px solid #7ec8e3; border-radius: 5px; padding: 6px 12px;
+    font-size: 12px; color: #7ec8e3; width: 100%; text-align: center;
+    transition: background 0.2s;
+  }
+  #file-btn:hover { background: #2a5080; }
+  #file-input { display: none; }
+
+  #status { font-size: 11px; color: #888; margin-top: 8px; min-height: 16px; }
+  #hint { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+    font-size: 11px; color: #555; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="canvas-container"></div>
+
+<div id="ui">
+  <h1>DepthWizard</h1>
+  <div class="row">
+    <label>Vertical Exaggeration <span id="ve-value">2.0×</span></label>
+    <input type="range" id="ve-slider" min="0.1" max="10" step="0.1" value="2.0">
+  </div>
+  <div class="row">
+    <label for="file-btn">Upload Image</label>
+    <div id="file-btn" onclick="document.getElementById('file-input').click()">Choose file…</div>
+    <input type="file" id="file-input" accept="image/*">
+  </div>
+  <div id="status">Ready — orbit: left drag · zoom: scroll · pan: right drag</div>
+</div>
+<div id="hint">Orbit · Zoom · Pan</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+// ─── Scene setup ────────────────────────────────────────────────────────────
+const container = document.getElementById('canvas-container');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+container.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a12);
+scene.fog = new THREE.Fog(0x0a0a12, 800, 2000);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 5000);
+camera.position.set(0, 400, 700);
+camera.lookAt(0, 0, 0);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+// Lights
+const ambient = new THREE.AmbientLight(0x334466, 0.6);
+scene.add(ambient);
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(300, 600, 400);
+sun.castShadow = true;
+scene.add(sun);
+
+// ─── Terrain mesh ───────────────────────────────────────────────────────────
+const GRID = 512;           // vertex grid resolution
+const PLANE_SIZE = 900;     // world units
+
+const vertexShader = `
+  uniform sampler2D uHeightMap;
+  uniform float uExaggeration;
+  uniform float uMaxHeight;
+
+  varying float vHeight;
+  varying vec3 vNormal;
+
+  void main() {
+    vec2 uv = uv;
+    float h = texture2D(uHeightMap, uv).r * uMaxHeight * uExaggeration;
+    vHeight = h;
+
+    vec3 displaced = position + vec3(0.0, h, 0.0);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(displaced, 1.0);
+
+    // Approximate normal from finite differences (sampled in shader)
+    float eps = 1.0 / float(${GRID});
+    float hL = texture2D(uHeightMap, uv + vec2(-eps, 0.0)).r * uMaxHeight * uExaggeration;
+    float hR = texture2D(uHeightMap, uv + vec2( eps, 0.0)).r * uMaxHeight * uExaggeration;
+    float hD = texture2D(uHeightMap, uv + vec2(0.0, -eps)).r * uMaxHeight * uExaggeration;
+    float hU = texture2D(uHeightMap, uv + vec2(0.0,  eps)).r * uMaxHeight * uExaggeration;
+    vNormal = normalize(vec3(hL - hR, 2.0, hD - hU));
+  }
+`;
+
+const fragmentShader = `
+  uniform float uMaxHeight;
+  uniform float uExaggeration;
+
+  varying float vHeight;
+  varying vec3 vNormal;
+
+  // Sun direction (world space, normalised)
+  vec3 sunDir = normalize(vec3(0.5, 1.0, 0.6));
+
+  vec3 heightColor(float t) {
+    // deep blue → green → tan → white
+    vec3 deep   = vec3(0.05, 0.15, 0.35);
+    vec3 low    = vec3(0.15, 0.45, 0.20);
+    vec3 mid    = vec3(0.65, 0.55, 0.35);
+    vec3 high   = vec3(0.95, 0.95, 0.95);
+    if (t < 0.33) return mix(deep, low,  t / 0.33);
+    if (t < 0.66) return mix(low,  mid, (t - 0.33) / 0.33);
+    return mix(mid, high, (t - 0.66) / 0.34);
+  }
+
+  void main() {
+    float normH = clamp(vHeight / (uMaxHeight * uExaggeration), 0.0, 1.0);
+    vec3 baseCol = heightColor(normH);
+
+    // Hillshade
+    float diffuse = max(dot(vNormal, sunDir), 0.0);
+    float shade = 0.35 + 0.65 * diffuse;
+
+    gl_FragColor = vec4(baseCol * shade, 1.0);
+  }
+`;
+
+// Start with a flat 1×1 placeholder texture
+const placeholderData = new Float32Array(4); // 2×2 black
+const heightTexture = new THREE.DataTexture(placeholderData, 2, 2, THREE.RedFormat, THREE.FloatType);
+heightTexture.needsUpdate = true;
+
+const uniforms = {
+  uHeightMap:    { value: heightTexture },
+  uExaggeration: { value: 2.0 },
+  uMaxHeight:    { value: 1.0 },
+};
+
+const geometry = new THREE.PlaneGeometry(PLANE_SIZE, PLANE_SIZE, GRID, GRID);
+geometry.rotateX(-Math.PI / 2);  // flat in XZ plane
+
+const material = new THREE.ShaderMaterial({
+  vertexShader, fragmentShader, uniforms,
+  side: THREE.DoubleSide,
+});
+
+const mesh = new THREE.Mesh(geometry, material);
+mesh.receiveShadow = true;
+scene.add(mesh);
+
+// Grid helper (subtle)
+const grid = new THREE.GridHelper(PLANE_SIZE, 20, 0x223344, 0x223344);
+grid.position.y = -0.5;
+scene.add(grid);
+
+// ─── Vertical exaggeration slider ───────────────────────────────────────────
+const veSlider = document.getElementById('ve-slider');
+const veValue  = document.getElementById('ve-value');
+veSlider.addEventListener('input', () => {
+  const v = parseFloat(veSlider.value);
+  uniforms.uExaggeration.value = v;
+  veValue.textContent = v.toFixed(1) + '×';
+});
+
+// ─── File upload → /upload ──────────────────────────────────────────────────
+const fileInput = document.getElementById('file-input');
+const status    = document.getElementById('status');
+
+fileInput.addEventListener('change', async () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+  status.textContent = 'Uploading…';
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const resp = await fetch('/upload', { method: 'POST', body: formData });
+    if (!resp.ok) { status.textContent = 'Server error: ' + resp.status; return; }
+
+    const buf = await resp.arrayBuffer();
+    const metaLen = new DataView(buf).getUint32(0, true);
+    const metaJson = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, metaLen)));
+    const floatData = new Float32Array(buf, 4 + metaLen);
+
+    const { width, height, min_height, max_height } = metaJson;
+
+    // Normalise to [0,1] for the texture's red channel
+    const norm = new Float32Array(floatData.length);
+    const range = max_height - min_height || 1;
+    for (let i = 0; i < floatData.length; i++) {
+      norm[i] = (floatData[i] - min_height) / range;
+    }
+
+    const tex = new THREE.DataTexture(norm, width, height, THREE.RedFormat, THREE.FloatType);
+    tex.needsUpdate = true;
+
+    uniforms.uHeightMap.value = tex;
+    uniforms.uMaxHeight.value = range;
+
+    status.textContent = `Loaded ${width}×${height} · ${min_height.toFixed(1)}–${max_height.toFixed(1)} m`;
+    document.getElementById('hint').style.display = 'none';
+
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  }
+});
+
+// ─── Resize ─────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ─── Render loop ────────────────────────────────────────────────────────────
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>

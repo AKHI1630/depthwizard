@@ -1,0 +1,13 @@
+node_modules/
+.venv/
+__pycache__/
+checkpoints/
+*.h5
+*.tif
+*.mp4
+data/
+*.pyc
+.env
+dist/
+build/
+*.egg-info/
