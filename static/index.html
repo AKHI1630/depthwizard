@@ -56,10 +56,9 @@ renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 container.appendChild(renderer.domElement);
 
-// Step 2: verify float texture support
-const gl = renderer.getContext();
-const floatExt = gl.getExtension('OES_texture_float') || gl.getExtension('WEBGL_color_buffer_float');
-console.log('[DepthWizard] Float texture support:', floatExt ? 'YES' : 'NO — heights may be clamped');
+// Float textures are not universally supported (WebGL 1 / mobile).
+// We use RGBA UnsignedByte with RG-packed 16-bit heights instead.
+console.log('[DepthWizard] Using RG-packed RGBA Uint8 heightmap — no float texture dependency.');
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0a0a12);
@@ -74,39 +73,50 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 
 // ─── Shaders ────────────────────────────────────────────────────────────────
-// NOTE: sunDir must be computed inside main() — GLSL ES forbids calling
-// functions (normalize) in global-scope variable initializers.
+// Heights are RG-packed 16-bit in an RGBA Uint8 texture.
+// Pack (JS): val = round(norm * 65535); R = val >> 8; G = val & 0xFF
+// Unpack (GLSL): h = (texel.r*255.0*256.0 + texel.g*255.0) / 65535.0
+// NearestFilter is mandatory — bilinear filtering blends R and G bytes,
+// corrupting the unpacked value at edges.
 const vertexShader = `
   uniform sampler2D uHeightMap;
   uniform float uExaggeration;
+  uniform float uMinHeight;
   uniform float uMaxHeight;
-  uniform float uTexelSize;   // 1.0 / textureWidth
+  uniform float uTexelSize;   // 1.0 / max(width, height)
 
   varying float vNormHeight;  // [0,1] for colour ramp
   varying float vDiffuse;     // Lambertian term
 
+  // Unpack 16-bit height from RG channels of a Uint8 RGBA texture.
+  // WebGL normalises Uint8 channels to [0,1], so byte = channel * 255.
+  float unpackHeight(vec2 uv) {
+    vec4 t = texture2D(uHeightMap, uv);
+    return (t.r * 255.0 * 256.0 + t.g * 255.0) / 65535.0;
+  }
+
   void main() {
     vec2 uv = uv;
+    float h = unpackHeight(uv);
 
-    float h  = texture2D(uHeightMap, uv).r;
-
-    // Central-difference normals — sample four neighbours, scale by exaggeration
+    // Central-difference normals — four neighbours at texel-step distance.
+    // Scale differences by the same factor as displacement so normals
+    // track the exaggerated surface, not the flat normalised one.
     float eps = uTexelSize;
-    float hL = texture2D(uHeightMap, uv + vec2(-eps,  0.0)).r;
-    float hR = texture2D(uHeightMap, uv + vec2( eps,  0.0)).r;
-    float hD = texture2D(uHeightMap, uv + vec2( 0.0, -eps)).r;
-    float hU = texture2D(uHeightMap, uv + vec2( 0.0,  eps)).r;
+    float hL = unpackHeight(uv + vec2(-eps,  0.0));
+    float hR = unpackHeight(uv + vec2( eps,  0.0));
+    float hD = unpackHeight(uv + vec2( 0.0, -eps));
+    float hU = unpackHeight(uv + vec2( 0.0,  eps));
 
-    // Scale differences the same way we scale displacement so
-    // the normal tracks the exaggeration.
-    float scale = uMaxHeight * uExaggeration;
+    float range = uMaxHeight - uMinHeight;
+    float scale = range * uExaggeration;
     vec3 normal = normalize(vec3((hL - hR) * scale, 2.0, (hD - hU) * scale));
 
-    // Sun direction — must be inside main() in GLSL ES
+    // sunDir inside main() — GLSL ES forbids function calls in global initialisers
     vec3 sunDir = normalize(vec3(0.6, 1.0, 0.5));
     vDiffuse = max(dot(normal, sunDir), 0.0);
 
-    vNormHeight = h;   // already [0,1] — normalised before upload
+    vNormHeight = h;  // [0,1]
 
     float worldH = h * scale;
     vec3 displaced = position + vec3(0.0, worldH, 0.0);
@@ -141,20 +151,22 @@ const fragmentShader = `
 const GRID = 512;
 const PLANE_SIZE = 900;
 
-// Placeholder: 2×2 red-channel float texture
-const placeholderData = new Float32Array(4);
-// Step 2: explicit RedFormat + FloatType + needsUpdate
+// Placeholder: 2×2 RGBA Uint8 texture (all zeros = height 0)
+const placeholderData = new Uint8Array(2 * 2 * 4);
 const heightTexture = new THREE.DataTexture(
   placeholderData, 2, 2,
-  THREE.RedFormat, THREE.FloatType
+  THREE.RGBAFormat, THREE.UnsignedByteType
 );
+heightTexture.minFilter = THREE.NearestFilter;
+heightTexture.magFilter = THREE.NearestFilter;
 heightTexture.needsUpdate = true;
 
 const uniforms = {
   uHeightMap:    { value: heightTexture },
   uExaggeration: { value: 2.0 },
+  uMinHeight:    { value: 0.0 },
   uMaxHeight:    { value: 1.0 },
-  uTexelSize:    { value: 0.5 },   // updated after each upload
+  uTexelSize:    { value: 0.5 },
 };
 
 const geometry = new THREE.PlaneGeometry(PLANE_SIZE, PLANE_SIZE, GRID, GRID);
@@ -204,15 +216,16 @@ document.getElementById('file-input').addEventListener('change', async () => {
     const meta = JSON.parse(new TextDecoder().decode(metaBytes));
     const { width, height, min_height, max_height } = meta;
 
-    // Step 1: FIX — copy raw bytes to an aligned buffer before wrapping as Float32Array.
-    // The offset (4 + metaLen) may not be 4-byte aligned, which throws a RangeError.
+    // Copy raw bytes into an aligned buffer — offset (4+metaLen) may not be
+    // 4-byte aligned, which would throw a RangeError on Float32Array construction.
     const rawByteOffset = 4 + metaLen;
     const rawByteLength = width * height * 4;
     const aligned = new ArrayBuffer(rawByteLength);
     new Uint8Array(aligned).set(new Uint8Array(buf, rawByteOffset, rawByteLength));
     const floatData = new Float32Array(aligned);
 
-    // Step 1: diagnostic logging — tells us if data is real or all-zero
+    // Diagnostic — runs unconditionally before any texture work.
+    // If min===max here the bug is backend or parsing; otherwise it's downstream.
     let mn = Infinity, mx = -Infinity, sum = 0;
     for (let i = 0; i < floatData.length; i++) {
       const v = floatData[i];
@@ -221,28 +234,42 @@ document.getElementById('file-input').addEventListener('change', async () => {
       sum += v;
     }
     const mean = sum / floatData.length;
-    console.log(`[DepthWizard] float32 array: length=${floatData.length}, min=${mn.toFixed(2)}, max=${mx.toFixed(2)}, mean=${mean.toFixed(2)}`);
+    console.log(`[DepthWizard] float32: length=${floatData.length}, min=${mn.toFixed(2)}, max=${mx.toFixed(2)}, mean=${mean.toFixed(2)}`);
     console.log(`[DepthWizard] metadata:`, meta);
-
     if (mn === mx) {
-      console.warn('[DepthWizard] min === max — data is flat; bug is in backend or parsing');
+      console.warn('[DepthWizard] *** min===max — data is flat; bug is backend or parsing ***');
     } else {
-      console.log('[DepthWizard] data has height variation — bug (if any) is in texture upload or shader');
+      console.log('[DepthWizard] data has height variation — proceeding to pack texture');
     }
 
-    // Normalise to [0,1] for the Red channel
+    // Pack normalised height into RG channels of a Uint8 RGBA texture.
+    // val ∈ [0, 65535]; R = high byte, G = low byte, B/A unused (0).
+    // Round-trip: h = (R*256 + G) / 65535 ≈ h_norm to within 1/65535.
     const range = max_height - min_height || 1.0;
-    const norm = new Float32Array(floatData.length);
-    for (let i = 0; i < floatData.length; i++) {
-      norm[i] = (floatData[i] - min_height) / range;
+    const rgba = new Uint8Array(width * height * 4);
+    for (let i = 0; i < width * height; i++) {
+      const norm = (floatData[i] - min_height) / range;
+      const val  = Math.round(Math.min(Math.max(norm, 0.0), 1.0) * 65535);
+      rgba[i * 4 + 0] = (val >> 8) & 0xFF;   // R — high byte
+      rgba[i * 4 + 1] =  val       & 0xFF;   // G — low byte
+      rgba[i * 4 + 2] = 0;
+      rgba[i * 4 + 3] = 255;
     }
 
-    // Step 2: new DataTexture with RedFormat + FloatType, needsUpdate explicit
-    const tex = new THREE.DataTexture(norm, width, height, THREE.RedFormat, THREE.FloatType);
+    // Spot-check round-trip on one pixel (centre)
+    const ci = Math.floor(height / 2) * width + Math.floor(width / 2);
+    const ciR = rgba[ci * 4], ciG = rgba[ci * 4 + 1];
+    const unpacked = (ciR * 256 + ciG) / 65535 * range + min_height;
+    console.log(`[DepthWizard] round-trip check centre px: original=${floatData[ci].toFixed(2)}, repacked=${unpacked.toFixed(2)}`);
+
+    const tex = new THREE.DataTexture(rgba, width, height, THREE.RGBAFormat, THREE.UnsignedByteType);
+    tex.minFilter = THREE.NearestFilter;
+    tex.magFilter = THREE.NearestFilter;
     tex.needsUpdate = true;
 
     uniforms.uHeightMap.value = tex;
-    uniforms.uMaxHeight.value = range;
+    uniforms.uMinHeight.value = min_height;
+    uniforms.uMaxHeight.value = max_height;
     uniforms.uTexelSize.value = 1.0 / Math.max(width, height);
 
     status.textContent = `Loaded ${width}×${height} · ${min_height.toFixed(1)}–${max_height.toFixed(1)} m`;
