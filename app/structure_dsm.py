@@ -4,9 +4,9 @@ Pipeline:
 1. SLIC superpixels on the RGB image
 2. Classify each region: BUILDING, ROAD, VEGETATION, GROUND
 3. Assign heights:
-   - BUILDING → constant median depth (flat roofs, sharp walls)
-   - ROAD + GROUND → common base elevation (flat terrain)
-   - VEGETATION → median height, mild roughness retained
+   - BUILDING: constant median depth (flat roofs, sharp walls)
+   - ROAD + GROUND: common base elevation (flat terrain)
+   - VEGETATION: median height, mild roughness retained
 4. Compose final heightmap
 """
 import logging
@@ -14,12 +14,11 @@ import time
 
 import numpy as np
 from PIL import Image
+from scipy import ndimage
 from skimage.segmentation import slic
-from skimage.measure import regionprops, label as sk_label
 
 logger = logging.getLogger(__name__)
 
-# Class labels
 BUILDING = 0
 ROAD = 1
 VEGETATION = 2
@@ -27,63 +26,34 @@ GROUND = 3
 CLASS_NAMES = {BUILDING: "BUILDING", ROAD: "ROAD", VEGETATION: "VEGETATION", GROUND: "GROUND"}
 
 
-def classify_regions(
-    image_rgb: np.ndarray,
-    segments: np.ndarray,
-) -> np.ndarray:
-    """Classify each superpixel region from simple features.
+def _classify_vectorized(image_rgb: np.ndarray, segments: np.ndarray) -> np.ndarray:
+    """Classify superpixels using vectorized scipy.ndimage operations."""
+    n_segs = segments.max() + 1
+    seg_ids = np.arange(n_segs)
+    classes = np.full(n_segs, GROUND, dtype=np.int32)
 
-    Features per region:
-    - mean RGB
-    - interior texture std (grayscale std within region)
-    - compactness (area / perimeter^2, higher = more compact/square)
-    - green excess index (2*G - R - B) / (R + G + B)
-    """
-    gray = np.mean(image_rgb, axis=2)
-    n_segments = segments.max() + 1
-    classes = np.full(n_segments, GROUND, dtype=np.int32)
+    r = image_rgb[:, :, 0]
+    g = image_rgb[:, :, 1]
+    b = image_rgb[:, :, 2]
+    gray = (r + g + b) / 3.0
 
-    label_img = sk_label(segments + 1)
-    props = regionprops(label_img)
+    mean_r = ndimage.mean(r, segments, seg_ids)
+    mean_g = ndimage.mean(g, segments, seg_ids)
+    mean_b = ndimage.mean(b, segments, seg_ids)
+    mean_brightness = (np.array(mean_r) + np.array(mean_g) + np.array(mean_b)) / 3.0
+    texture_std = np.array(ndimage.standard_deviation(gray, segments, seg_ids))
 
-    for region in props:
-        seg_id = region.label - 1
-        if seg_id < 0 or seg_id >= n_segments:
-            continue
+    rgb_sum = np.array(mean_r) + np.array(mean_g) + np.array(mean_b)
+    rgb_sum[rgb_sum == 0] = 1.0
+    green_excess = (2 * np.array(mean_g) - np.array(mean_r) - np.array(mean_b)) / rgb_sum
 
-        mask = segments == seg_id
-        pixels = image_rgb[mask]
-        gray_pixels = gray[mask]
+    is_veg = (green_excess > 0.08) & (texture_std > 15)
+    is_bldg = (~is_veg) & (mean_brightness > 140) & (texture_std < 35)
+    is_road = (~is_veg) & (~is_bldg) & (mean_brightness < 100) & (texture_std < 25)
 
-        if len(pixels) < 4:
-            continue
-
-        mean_r = float(pixels[:, 0].mean())
-        mean_g = float(pixels[:, 1].mean())
-        mean_b = float(pixels[:, 2].mean())
-        mean_brightness = (mean_r + mean_g + mean_b) / 3.0
-        texture_std = float(gray_pixels.std())
-
-        rgb_sum = mean_r + mean_g + mean_b
-        green_excess = (2 * mean_g - mean_r - mean_b) / rgb_sum if rgb_sum > 0 else 0.0
-
-        area = float(region.area)
-        perimeter = float(region.perimeter) if region.perimeter > 0 else 1.0
-        compactness = area / (perimeter * perimeter)
-
-        bbox = region.bbox
-        bbox_h = bbox[2] - bbox[0]
-        bbox_w = bbox[3] - bbox[1]
-        aspect = max(bbox_h, bbox_w) / (min(bbox_h, bbox_w) + 1e-6)
-
-        if green_excess > 0.08 and texture_std > 15:
-            classes[seg_id] = VEGETATION
-        elif mean_brightness > 140 and compactness > 0.02 and texture_std < 35:
-            classes[seg_id] = BUILDING
-        elif mean_brightness < 100 and texture_std < 25:
-            classes[seg_id] = ROAD
-        else:
-            classes[seg_id] = GROUND
+    classes[is_veg] = VEGETATION
+    classes[is_bldg] = BUILDING
+    classes[is_road] = ROAD
 
     return classes
 
@@ -116,20 +86,20 @@ def structure_aware_dsm(
         start_label=0,
         channel_axis=2,
     )
-    logger.info("SLIC: %d superpixels in %.2f s", segments.max() + 1, time.perf_counter() - t_slic)
+    t_slic_done = time.perf_counter()
+    logger.info("SLIC: %d superpixels in %.2f s", segments.max() + 1, t_slic_done - t_slic)
 
     t_cls = time.perf_counter()
-    classes = classify_regions(image_rgb, segments)
-    logger.info("Classification done in %.2f s", time.perf_counter() - t_cls)
+    classes = _classify_vectorized(image_rgb, segments)
+    t_cls_done = time.perf_counter()
+    logger.info("Classification: %.2f s", t_cls_done - t_cls)
 
     class_map = classes[segments]
 
     ground_mask = (class_map == ROAD) | (class_map == GROUND)
-    if ground_mask.any():
-        base_height = float(np.median(depth[ground_mask]))
-    else:
-        base_height = float(np.percentile(depth, 20))
+    base_height = float(np.median(depth[ground_mask])) if ground_mask.any() else float(np.percentile(depth, 20))
 
+    t_compose = time.perf_counter()
     structured = np.copy(depth)
     n_segs = segments.max() + 1
     counts = {BUILDING: 0, ROAD: 0, VEGETATION: 0, GROUND: 0}
@@ -153,6 +123,8 @@ def structure_aware_dsm(
             structured[mask] = med + roughness * 0.3
             height_sums[cls].append(med)
 
+    t_compose_done = time.perf_counter()
+
     stats = {}
     for cls in (BUILDING, ROAD, VEGETATION, GROUND):
         name = CLASS_NAMES[cls]
@@ -162,6 +134,9 @@ def structure_aware_dsm(
         logger.info("  %s: %d regions, mean height=%.2f", name, cnt, mean_h)
 
     elapsed = time.perf_counter() - t0
-    logger.info("Structure-aware DSM: %.2f s total", elapsed)
+    logger.info(
+        "Structure DSM: %.2f s total (SLIC %.2f + classify %.2f + compose %.2f)",
+        elapsed, t_slic_done - t_slic, t_cls_done - t_cls, t_compose_done - t_compose,
+    )
 
     return structured.astype(np.float32), class_map.astype(np.int32), stats

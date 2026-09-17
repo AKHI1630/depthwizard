@@ -13,6 +13,8 @@ Fixed to `C:\Users\rtadi001\ClaudeAI\depthwizard`. Do not create or reference fi
 ## Architecture
 - Height generation is behind a `HeightEstimator` interface (`estimate(image) -> (array, metadata)`).
 - Swap implementations in `estimators/` without touching the frontend.
+- Post-processing: `app/depth_postprocess.py` — shared orient_depth, highpass_detrend, finalize_heightmap.
+- Structure DSM: `app/structure_dsm.py` — SLIC superpixels + vectorized classification.
 - Calibration: `app/calibration.py` — GeoTIFF detection, SRTM RANSAC calibration, DSM export.
 - Validation: `app/validation.py` — MAE, RMSE, R², error map, scatter plot.
 - Tiling: `app/tiling.py` — overlapping tile merge for large images.
@@ -20,15 +22,16 @@ Fixed to `C:\Users\rtadi001\ClaudeAI\depthwizard`. Do not create or reference fi
 ## Commands
 ```bash
 # Start backend (from repo root, inside venv) — NO --reload flag
-.venv\Scripts\uvicorn.exe app.main:app --host 127.0.0.1 --port 8000
+.venv\Scripts\uvicorn.exe app.main:app --host 127.0.0.1 --port 8001
 ```
-Server starts immediately; model loads in background. Watch the log for:
-`DepthWizard ready — MiDaS_small loaded, accepting requests.`
+Server starts immediately; models load in background. Watch the log for:
+`DepthWizard ready — Depth-Anything-V2 loaded, accepting requests.`
 Poll `GET /health` to check model status programmatically.
 
 ## API Endpoints
-- `GET /health` — model status
-- `POST /upload?estimator=midas|synthetic&detrend=true|false` — upload image, returns binary heightmap
+- `GET /health` — per-model status (`depth_anything`, `midas`)
+- `POST /upload?estimator=depth_anything|midas|synthetic&detrend=true|false&structure=true|false` — returns binary heightmap + timing metadata
+- `GET /structure-map` — color-coded segmentation PNG (red=building, gray=road, green=veg, brown=ground)
 - `POST /calibrate` — upload reference GeoTIFF to RANSAC-calibrate last prediction
 - `POST /validate` — upload reference GeoTIFF to compute error stats vs last prediction
 
@@ -39,13 +42,19 @@ Poll `GET /health` to check model status programmatically.
 
 ## ⚠ Network constraints
 - **HuggingFace Xet CDN (us.aws.cdn.hf.co) returns 503** on this corporate network. `HF_HUB_DISABLE_XET=1` is set in main.py but may not help.
+- **Depth Anything V2 loads from local weights** in `models/depth-anything-v2-small/` — NEVER touch HuggingFace network. `local_files_only=True`.
 - **MiDaS via torch.hub works** — GitHub releases CDN is reachable. Trust bypass: `torch.hub._check_repo_is_trusted = lambda *a, **k: None`.
 - Do NOT use `--reload` with uvicorn — it watches `.venv/` and restarts during pip installs.
 
 ## What's working (as of 2026-09-17)
-- **MiDaS_small** depth estimator via torch.hub (14.7s load, 0.37s inference).
+- **Depth Anything V2 Small** — primary estimator, local weights (0.4s load, 1.3s inference for 512px).
+- **MiDaS_small** — secondary estimator via torch.hub (5s load).
+- **Sign correction**: Pearson correlation between brightness and depth auto-detects/flips inverted depth.
+- **Detrending**: gaussian_filter mode='nearest' + cosine edge taper removes tile rim artifacts.
+- **Structure-aware DSM**: SLIC superpixels + vectorized classification → flat roofs, flat terrain, vegetation roughness.
+- **Per-stage timing** in response metadata and UI status bar.
 - RG-packed 16-bit heightmap rendering — hills and buildings visible.
-- **Viewer features**: viridis/cividis/terrain palettes, slope overlay, hillshade-only mode.
+- **Viewer features**: viridis/cividis/terrain palettes, slope overlay, hillshade-only mode, segmentation overlay.
 - **Camera modes**: orbit, first-person (WASD+mouse), aerial (top-down), waypoint flythrough.
 - **Click-to-measure**: real-time height readout at cursor position.
 - **Cross-section profile**: click two points, see 2D elevation profile.
@@ -55,15 +64,29 @@ Poll `GET /health` to check model status programmatically.
 - Synthetic fallback always available. Estimator dropdown in UI.
 
 ## Estimator notes
-- MiDaS_small: 81.8 MB checkpoint from GitHub releases. Native input 256×256.
-- **Tiling**: images >256px are split into overlapping 256×256 tiles, inferred individually, and merged with cosine-feathered blending. This preserves building detail that was previously destroyed by 4× downsampling.
-- **Detrending**: MiDaS has a ground-level photo prior that produces bogus low-frequency ramps on nadir imagery. High-pass filter (large-sigma Gaussian subtraction) removes the artefact and keeps only building/structure relief. Controlled by `?detrend=true|false` and UI checkbox.
+- **Depth Anything V2 Small** (default): 99.2 MB local weights in `models/depth-anything-v2-small/`. Uses `DepthAnythingForDepthEstimation` (NOT DPTForDepthEstimation). 518×518 tiles, 128px overlap.
+- **MiDaS_small**: 81.8 MB from GitHub releases. 256×256 tiles, 64px overlap.
+- **Tiling**: images >tile_size are split into overlapping tiles, inferred individually, merged with cosine-feathered blending.
+- **Detrending**: High-pass filter (large-sigma Gaussian subtraction) removes low-frequency ramps. `mode='nearest'` + cosine taper to prevent edge artifacts.
+- **Sign correction**: Pearson r between image brightness and raw depth; auto-flip if negative.
 - Output interpolated to 1024×1024. Uncalibrated 0–150m range.
-- Depth-Anything-V2-Small: NOT working (HF CDN blocked). Code exists but not wired in.
 - Synthetic: deterministic Gaussian hills + box buildings, 1024×1024.
 
+## Structure-aware DSM
+- SLIC superpixels (n=200, compactness=20) from scikit-image.
+- Vectorized classification using scipy.ndimage.mean/standard_deviation (not regionprops).
+- Classes: BUILDING (flat roof=median depth), ROAD/GROUND (base elevation), VEGETATION (median + 30% roughness).
+- Thresholds: brightness, texture std, green excess.
+- Performance: ~3s for 1024×1024 (SLIC ~2s, classify ~0.2s, compose ~0.6s).
+
+## Performance (512px test image)
+- Depth inference (DA V2): ~1.3s
+- Structure DSM: ~2.9s (SLIC 2.1 + classify 0.2 + compose 0.6)
+- Total: ~5s — well under 30s budget
+
 ## Conventions
-- Python venv at `.venv/`
+- Python 3.12.10, venv at `.venv/`, transformers==4.49.0, scikit-image==0.26.0
 - Static frontend at `static/`
+- Model weights in `models/` (gitignored)
 - Do not auto-commit without asking.
 - Never embed GitHub tokens in URLs or command lines.

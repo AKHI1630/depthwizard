@@ -186,13 +186,19 @@ async def upload(
             return _pack_response(result.heights, result.to_meta_dict())
         logger.warning("GeoTIFF elevation read failed — falling back to estimator")
 
-    est, warning = _pick_estimator(estimator)
+    import time as _time
 
+    est, warning = _pick_estimator(estimator)
+    timing = {}
+
+    t_total = _time.perf_counter()
     try:
         kwargs = {}
         if hasattr(est, 'estimate') and 'detrend' in est.estimate.__code__.co_varnames:
             kwargs['detrend'] = detrend
+        t_est = _time.perf_counter()
         height_array, meta = est.estimate(image_bytes, **kwargs)
+        timing["depth_inference"] = round(_time.perf_counter() - t_est, 2)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -204,14 +210,20 @@ async def upload(
     if structure:
         from PIL import Image as PILImage
         import io as _io
+        t_struct = _time.perf_counter()
         img_pil = PILImage.open(_io.BytesIO(image_bytes)).convert("RGB")
         structured, class_map, stats = structure_aware_dsm(height_array, img_pil)
+        timing["structure_dsm"] = round(_time.perf_counter() - t_struct, 2)
         height_array = structured
         _last_prediction["class_map"] = class_map
         _last_prediction["structure_stats"] = stats
 
+    timing["total"] = round(_time.perf_counter() - t_total, 2)
+    logger.info("Timing: %s", timing)
+
     meta_dict = meta.to_dict()
     meta_dict["provenance"] = "relative"
+    meta_dict["timing"] = timing
     if structure:
         meta_dict["structure_stats"] = _last_prediction.get("structure_stats", {})
     if warning:

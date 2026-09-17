@@ -892,7 +892,17 @@ document.getElementById('file-input').addEventListener('change', async () => {
     uniforms.uMaxHeight.value = max_height;
     uniforms.uTexelSize.value = 1.0 / Math.max(width, height);
 
-    status.textContent = `Loaded ${width}×${height} · ${min_height.toFixed(1)}–${max_height.toFixed(1)} m`;
+    // Timing info
+    let timingStr = '';
+    if (meta.timing) {
+      const t = meta.timing;
+      const parts = [];
+      if (t.depth_inference) parts.push(`depth ${t.depth_inference}s`);
+      if (t.structure_dsm) parts.push(`structure ${t.structure_dsm}s`);
+      parts.push(`total ${t.total}s`);
+      timingStr = ` · ${parts.join(' + ')}`;
+    }
+    status.textContent = `Loaded ${width}×${height} · ${min_height.toFixed(1)}–${max_height.toFixed(1)} m${timingStr}`;
     updateProvenance(meta.provenance || 'relative');
 
     // Structure-aware stats

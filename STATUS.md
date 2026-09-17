@@ -1,63 +1,92 @@
 # DepthWizard — Status Report (2026-09-17)
 
-## Tasks Completed
+## SIH 26175 Tasks (Steps 1–4)
+
+### STEP 1 — Fix Inverted Depth Sign ✅
+- **Commit**: `9dd7824`
+- Pearson correlation between brightness and depth: auto-flip when r < 0
+- DA V2: r=0.38 raw → 0.64 final; MiDaS: r=0.06 raw → 0.17 final
+- gaussian_filter `mode='nearest'` + cosine edge taper fixes detrend rim artifact
+- Shared post-processing in `app/depth_postprocess.py`
+
+### STEP 2 — Local Depth Anything V2 ✅
+- **Commit**: `79e2274`
+- Local weights from github.com/AKHI1630/my-project → `models/depth-anything-v2-small/`
+- Uses `DepthAnythingForDepthEstimation` + `AutoImageProcessor`, `local_files_only=True`
+- 518×518 tiles, 128px overlap (vs MiDaS 256×256, 64px)
+- DA V2 is default; MiDaS kept as secondary; fallback: DA → MiDaS → synthetic
+- Load: 0.4s local, no network
+
+### STEP 3 — Structure-Aware DSM ✅
+- **Commit**: `fd2e096`
+- SLIC superpixels (scikit-image, classical only, no model downloads)
+- Classes: BUILDING (flat roof), ROAD (flat terrain), VEGETATION (mild roughness), GROUND (base)
+- UI toggle, building count display, color-coded segmentation overlay
+- `/structure-map` endpoint returns RGBA PNG
+
+### STEP 4 — Efficiency ✅
+- Vectorized classification: scipy.ndimage replaces regionprops (2.19s → 0.21s, 10× speedup)
+- Per-stage timing in response metadata (`timing` key in JSON)
+- Timing displayed in UI status bar
+- Total pipeline: ~5s for 512px image (well under 30s budget)
+
+## Performance (512×512 test image, DA V2 + structure)
+| Stage | Time |
+|-------|------|
+| Depth inference (DA V2) | 1.33s |
+| Post-processing (orient + detrend + finalize) | 0.69s |
+| Structure DSM total | 2.95s |
+|  — SLIC superpixels | 2.11s |
+|  — Classification (vectorized) | 0.21s |
+|  — Composition | 0.58s |
+| **Pipeline total** | **4.98s** |
+
+## Prior Tasks
 
 ### TASK 0 — Depth Model ✅
-- **MiDaS_small** integrated via `torch.hub` (GitHub releases CDN).
-- Trust bypass: `torch.hub._check_repo_is_trusted = lambda *a, **k: None`.
-- Loads in ~15s, inference in ~0.4s on CPU.
-- Verified end-to-end: 256×256 test image → 1024×1024 depth → 3D terrain renders correctly (buildings UP, not craters).
-- Depth-Anything-V2-Small code exists but HuggingFace Xet CDN is blocked (503).
+- **MiDaS_small** via `torch.hub` (GitHub releases CDN). Trust bypass applied.
+- **Depth Anything V2 Small** from local weights (no HuggingFace network).
 
 ### TASK 1 — Metric Calibration ✅
-- `app/calibration.py`: GeoTIFF detection via rasterio, SRTM RANSAC calibration via scikit-learn.
-- `POST /calibrate` endpoint: upload reference GeoTIFF, RANSAC maps relative→absolute metres.
-- `POST /upload` auto-detects GeoTIFFs and reads elevation band directly (provenance: `geotiff-direct`).
-- Provenance badges in UI: RELATIVE (amber), GeoTIFF DIRECT (green), SRTM CALIBRATED (blue).
-- DSM export function available (`export_dsm_geotiff`).
+- `app/calibration.py`: GeoTIFF detection via rasterio, SRTM RANSAC calibration.
+- `POST /calibrate` endpoint. Provenance badges: RELATIVE / GeoTIFF DIRECT / SRTM CALIBRATED.
 
-### TASK 2 — Enhanced Viewer (50% of score) ✅
-- **Color palettes**: Viridis, Cividis, Terrain. No rainbow/jet.
-- **Overlays**: Slope (green→yellow→red, 0–45°), Hillshade-only (greyscale).
-- **Camera modes**: Orbit (default), First-Person (WASD+mouse, pointer lock), Aerial (top-down, scroll zoom), Waypoint Flythrough (animated spline path).
-- **Reset Camera** button.
-- **Click-to-measure**: raycaster-based height readout at cursor, pixel coordinates shown.
-- **Cross-section profile**: click two terrain points → 2D profile chart with elevation scale.
-- **Legible fonts**: 13-14px throughout for screen recording readability.
+### TASK 2 — Enhanced Viewer ✅
+- Color palettes: Viridis, Cividis, Terrain.
+- Overlays: Slope, Hillshade, Segmentation.
+- Camera modes: Orbit, First-Person, Aerial, Waypoint Flythrough.
+- Click-to-measure, Cross-section profile.
 
 ### TASK 3 — Validation Panel ✅
-- `app/validation.py`: MAE, RMSE, median AE, R², bias computation.
-- `POST /validate` endpoint: upload reference GeoTIFF → comparison stats.
-- UI panel shows: stats table, signed error map (blue=under, red=over), pred-vs-ref scatter plot.
+- `POST /validate`: MAE, RMSE, R², bias, signed error map, scatter plot.
 
 ### TASK 4 — Robustness ✅
-- Input validation: empty file, 50 MB limit, 16px–8192px size range.
-- Large images auto-resized to ≤8192px.
-- `app/tiling.py`: overlapping tile-and-merge for images exceeding estimator capacity.
-- Proper error propagation: ValueError → 400, unexpected errors → 500 with logged stack trace.
-- Frontend shows server error detail messages.
+- Input validation, 50MB limit, tiling for large images, proper error propagation.
 
 ## Architecture
-
 ```
 app/
-├── main.py              FastAPI server, endpoints, model loader
-├── calibration.py       GeoTIFF detection, RANSAC calibration, DSM export
-├── validation.py        Error metrics, error map, scatter data
-├── tiling.py            Overlapping tile merge for large images
+├── main.py                FastAPI server, dual model loading, timing
+├── depth_postprocess.py   orient_depth, highpass_detrend, finalize_heightmap
+├── structure_dsm.py       SLIC superpixels, vectorized classification
+├── calibration.py         GeoTIFF detection, RANSAC calibration, DSM export
+├── validation.py          Error metrics, error map, scatter data
+├── tiling.py              Overlapping tile merge with cosine blending
 └── estimators/
-    ├── base.py          HeightEstimator ABC + HeightMetadata
-    ├── midas.py         MiDaS_small via torch.hub
-    ├── depth_anything.py  Depth-Anything-V2 (HF CDN blocked)
-    └── synthetic.py     Gaussian hills + box buildings
+    ├── base.py            HeightEstimator ABC + HeightMetadata
+    ├── depth_anything.py  Depth-Anything-V2-Small (local, 518px tiles)
+    ├── midas.py           MiDaS_small (torch.hub, 256px tiles)
+    └── synthetic.py       Gaussian hills + box buildings
 
 static/
-└── index.html           Three.js 3D viewer with all controls
+└── index.html             Three.js 3D viewer with all controls
+
+models/
+└── depth-anything-v2-small/   Local weights (gitignored)
 ```
 
 ## Known Limitations
-- MiDaS output is uncalibrated (0–150m relative). Needs SRTM reference for absolute metres.
-- MiDaS internal resolution is 256×256; output is interpolated to 1024×1024.
-- Validation and calibration require rasterio-readable GeoTIFF references.
-- No tiling integration in the API yet (module ready but not wired into /upload).
-- Single-threaded inference — no GPU, no batching.
+- Output is uncalibrated (0–150m relative) without SRTM reference.
+- CPU-only inference — no GPU, no batching.
+- SLIC is the bottleneck (~2s for 1024×1024); could be replaced with SEEDS or watershed for speed.
+- Structure classification uses fixed thresholds — may not generalize to all satellite imagery.
