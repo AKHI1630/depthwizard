@@ -1,6 +1,8 @@
 import io
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Tuple
 
 import numpy as np
@@ -14,18 +16,44 @@ MODEL_ID = "depth-anything/Depth-Anything-V2-Small-hf"
 OUT_SIZE = 1024
 HEIGHT_SCALE = 150.0  # uncalibrated metres — adjust when metric GT is available
 
+# Set HF_DEPTH_MODEL_PATH to a local directory containing model.safetensors,
+# config.json, and preprocessor_config.json to bypass the HuggingFace download
+# entirely (useful when the Xet CDN is blocked on the corporate network).
+_LOCAL_PATH_ENV = "HF_DEPTH_MODEL_PATH"
+
+
+def _model_source() -> str:
+    """Return local path if set and valid, otherwise the HF Hub model ID."""
+    local = os.environ.get(_LOCAL_PATH_ENV, "").strip()
+    if not local:
+        return MODEL_ID
+    p = Path(local)
+    required = ["config.json", "preprocessor_config.json"]
+    has_weights = (p / "model.safetensors").exists() or (p / "pytorch_model.bin").exists()
+    missing = [f for f in required if not (p / f).exists()]
+    if missing or not has_weights:
+        logger.warning(
+            "HF_DEPTH_MODEL_PATH=%s is set but missing files: %s%s — falling back to HF Hub.",
+            local,
+            missing,
+            [] if has_weights else ["model.safetensors"],
+        )
+        return MODEL_ID
+    logger.info("Loading model from local path: %s", local)
+    return local
+
 
 class DepthAnythingEstimator(HeightEstimator):
     def __init__(self):
-        # Import lazily so a missing torch install gives a clear error at load time,
-        # not at first request.
         from transformers import pipeline as hf_pipeline
 
-        logger.info("Loading %s on CPU (first run downloads ~99 MB)…", MODEL_ID)
+        source = _model_source()
+        if source == MODEL_ID:
+            logger.info("Loading %s from HuggingFace Hub (first run ~99 MB)…", MODEL_ID)
         t0 = time.perf_counter()
         self._pipe = hf_pipeline(
             task="depth-estimation",
-            model=MODEL_ID,
+            model=source,
             device="cpu",
         )
         logger.info("Model loaded in %.1f s", time.perf_counter() - t0)
@@ -37,7 +65,6 @@ class DepthAnythingEstimator(HeightEstimator):
         result = self._pipe(img)
         elapsed = time.perf_counter() - t0
 
-        # result["depth"] is a PIL Image (mode "I" — 32-bit int — or "F")
         depth_pil = result["depth"]
         depth_raw = np.array(depth_pil, dtype=np.float32)
 
@@ -52,7 +79,7 @@ class DepthAnythingEstimator(HeightEstimator):
         # Invert: model outputs near=large, we need tall=large.
         depth_inv = raw_max - depth_raw
 
-        # Resize to OUT_SIZE×OUT_SIZE (detail above 518px is interpolation, not real).
+        # Resize to OUT_SIZE×OUT_SIZE (real detail capped at ~518px by model internals).
         inv_pil = Image.fromarray(depth_inv).resize(
             (OUT_SIZE, OUT_SIZE), Image.BICUBIC
         )

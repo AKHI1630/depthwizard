@@ -1,8 +1,14 @@
 import json
 import logging
+import os
 import struct
 import threading
 from enum import Enum
+
+# Force HuggingFace to use the standard HTTP download path instead of the Xet
+# CDN (cas-server.xethub.hf.co), which 503s on this corporate network.
+# Must be set before any huggingface_hub / transformers import.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 from pathlib import Path
 from typing import Literal
 
