@@ -6,15 +6,19 @@ from typing import Tuple
 import numpy as np
 import torch
 from PIL import Image
-from scipy.ndimage import gaussian_filter
 
+from ..depth_postprocess import (
+    HEIGHT_SCALE,
+    OUT_SIZE,
+    finalize_heightmap,
+    highpass_detrend,
+    orient_depth,
+)
 from ..tiling import tile_and_merge
 from .base import HeightEstimator, HeightMetadata
 
 logger = logging.getLogger(__name__)
 
-OUT_SIZE = 1024
-HEIGHT_SCALE = 150.0
 TILE_SIZE = 256
 TILE_OVERLAP = 64
 
@@ -33,7 +37,6 @@ class MidasEstimator(HeightEstimator):
         logger.info("MiDaS_small loaded in %.1f s", time.perf_counter() - t0)
 
     def _infer_tile(self, tile_pil: Image.Image) -> np.ndarray:
-        """Run MiDaS on a single tile. Returns float32 inverse-depth at tile resolution."""
         tile_np = np.array(tile_pil.convert("RGB"))
         inp = self._transform(tile_np)
         with torch.no_grad():
@@ -75,47 +78,25 @@ class MidasEstimator(HeightEstimator):
 
         elapsed = time.perf_counter() - t0
         logger.info(
-            "MiDaS inference %.2f s | raw depth min=%.4f max=%.4f mean=%.4f std=%.4f",
+            "MiDaS inference %.2f s | raw min=%.4f max=%.4f mean=%.4f std=%.4f",
             elapsed, depth_raw.min(), depth_raw.max(), depth_raw.mean(), depth_raw.std(),
         )
 
-        # MiDaS outputs inverse depth (near=large). Invert so tall = high.
-        depth_inv = depth_raw.max() - depth_raw
+        gray = np.array(
+            img_pil.convert("L").resize(
+                (depth_raw.shape[1], depth_raw.shape[0]), Image.BILINEAR
+            ),
+            dtype=np.float32,
+        )
+        depth = orient_depth(depth_raw, gray)
 
         if detrend:
-            depth_inv = self._highpass(depth_inv)
+            depth = highpass_detrend(depth)
 
-        # Resize to output grid
-        if depth_inv.shape[0] != OUT_SIZE or depth_inv.shape[1] != OUT_SIZE:
-            depth_inv = np.array(
-                Image.fromarray(depth_inv).resize((OUT_SIZE, OUT_SIZE), Image.BILINEAR),
-                dtype=np.float32,
-            )
-
-        d_range = float(depth_inv.max() - depth_inv.min()) or 1.0
-        height = (depth_inv - depth_inv.min()) / d_range * HEIGHT_SCALE
+        height = finalize_heightmap(depth, img_pil, OUT_SIZE, HEIGHT_SCALE)
 
         meta = HeightMetadata(
             width=OUT_SIZE, height=OUT_SIZE,
             units="relative", min_height=0.0, max_height=HEIGHT_SCALE,
         )
         return height, meta
-
-    @staticmethod
-    def _highpass(depth: np.ndarray) -> np.ndarray:
-        """Remove bogus low-frequency ramp (MiDaS's ground-level photo prior)."""
-        std_before = float(depth.std())
-
-        sigma = max(depth.shape) // 4
-        low_freq = gaussian_filter(depth, sigma=sigma)
-        residual = depth - low_freq
-
-        std_after = float(residual.std())
-        logger.info(
-            "Detrend: sigma=%d | std before=%.4f after=%.4f (ratio %.2f)",
-            sigma, std_before, std_after,
-            std_after / std_before if std_before > 0 else 0,
-        )
-
-        residual -= residual.min()
-        return residual
