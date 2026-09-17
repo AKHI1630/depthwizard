@@ -12,12 +12,20 @@ os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+import numpy as np
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from .calibration import (
+    CalibrationResult,
+    calibrate_with_reference,
+    detect_geotiff,
+    read_geotiff_elevation,
+)
 from .estimators.base import HeightEstimator
 from .estimators.synthetic import SyntheticEstimator
+from .validation import validate as run_validation
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -91,30 +99,102 @@ async def health() -> JSONResponse:
     return JSONResponse(content=body, status_code=status_code)
 
 
+def _pack_response(height_array: np.ndarray, meta_dict: dict) -> Response:
+    meta_bytes = json.dumps(meta_dict).encode("utf-8")
+    prefix = struct.pack("<I", len(meta_bytes))
+    raw = height_array.astype("float32").tobytes()
+    return Response(
+        content=prefix + meta_bytes + raw,
+        media_type="application/octet-stream",
+        headers={"X-Meta-Length": str(len(meta_bytes))},
+    )
+
+
+_last_prediction: dict = {}
+
+
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
 # ── /upload ───────────────────────────────────────────────────────────────────
 @app.post("/upload")
 async def upload(
     file: UploadFile = File(...),
     estimator: Literal["midas", "synthetic"] = Query(default="midas"),
 ) -> Response:
-    est, warning = _pick_estimator(estimator)
     image_bytes = await file.read()
-    height_array, meta = est.estimate(image_bytes)
+
+    if len(image_bytes) == 0:
+        raise HTTPException(400, "Empty file uploaded.")
+    if len(image_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            413,
+            f"File too large ({len(image_bytes) / 1024 / 1024:.1f} MB). Max {MAX_UPLOAD_BYTES // 1024 // 1024} MB.",
+        )
+
+    geo = detect_geotiff(image_bytes)
+    if geo is not None:
+        logger.info("GeoTIFF detected: %s CRS=%s", geo["dtype"], geo["crs"])
+        result = read_geotiff_elevation(image_bytes)
+        if result is not None:
+            return _pack_response(result.heights, result.to_meta_dict())
+        logger.warning("GeoTIFF elevation read failed — falling back to estimator")
+
+    est, warning = _pick_estimator(estimator)
+
+    try:
+        height_array, meta = est.estimate(image_bytes)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.error("Estimator failed: %s", e, exc_info=True)
+        raise HTTPException(500, f"Depth estimation failed: {e}")
 
     meta_dict = meta.to_dict()
+    meta_dict["provenance"] = "relative"
     if warning:
         meta_dict["warning"] = warning
         logger.warning("Fallback active: %s", warning)
 
-    meta_bytes = json.dumps(meta_dict).encode("utf-8")
-    prefix = struct.pack("<I", len(meta_bytes))
-    raw = height_array.astype("float32").tobytes()
+    _last_prediction["heights"] = height_array
+    _last_prediction["meta"] = meta_dict
 
-    return Response(
-        content=prefix + meta_bytes + raw,
-        media_type="application/octet-stream",
-        headers={"X-Meta-Length": str(len(meta_bytes))},
-    )
+    return _pack_response(height_array, meta_dict)
+
+
+# ── /calibrate ───────────────────────────────────────────────────────────────
+@app.post("/calibrate")
+async def calibrate(reference: UploadFile = File(...)) -> Response:
+    if "heights" not in _last_prediction:
+        raise HTTPException(400, "No depth prediction to calibrate — upload an image first.")
+
+    ref_bytes = await reference.read()
+    result = calibrate_with_reference(_last_prediction["heights"], ref_bytes)
+    if result is None:
+        raise HTTPException(400, "Reference is not a valid elevation GeoTIFF, or calibration failed.")
+
+    return _pack_response(result.heights, result.to_meta_dict())
+
+
+# ── /validate ────────────────────────────────────────────────────────────────
+@app.post("/validate")
+async def validate_endpoint(reference: UploadFile = File(...)) -> JSONResponse:
+    if "heights" not in _last_prediction:
+        raise HTTPException(400, "No depth prediction to validate — upload an image first.")
+
+    ref_bytes = await reference.read()
+    ref_result = read_geotiff_elevation(ref_bytes, target_size=_last_prediction["heights"].shape[0])
+    if ref_result is None:
+        raise HTTPException(400, "Reference is not a valid elevation GeoTIFF.")
+
+    vr = run_validation(_last_prediction["heights"], ref_result.heights)
+
+    error_map_list = vr.error_map.flatten().tolist()
+
+    result = vr.to_dict()
+    result["error_map"] = error_map_list
+
+    return JSONResponse(content=result)
 
 
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

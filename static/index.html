@@ -43,6 +43,15 @@
   #status { font-size: 12px; color: #999; margin-top: 8px; min-height: 16px; }
   #warning { display: none; font-size: 12px; color: #f4a261; margin-top: 6px; }
 
+  /* ── Provenance badge ────────────────────────────────────────────────── */
+  .badge {
+    display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px;
+    font-weight: bold; letter-spacing: 0.03em; margin-top: 4px;
+  }
+  .badge-relative  { background: #3a2a1a; color: #f4a261; border: 1px solid #f4a261; }
+  .badge-geotiff   { background: #1a3a2a; color: #4ac97e; border: 1px solid #4ac97e; }
+  .badge-calibrated { background: #1a2a3a; color: #7ec8e3; border: 1px solid #7ec8e3; }
+
   /* ── Info panel (bottom-left) ────────────────────────────────────────── */
   #info-panel {
     position: fixed; bottom: 16px; left: 16px; z-index: 10;
@@ -62,6 +71,27 @@
     border-radius: 8px; padding: 10px; display: none;
   }
   #profile-canvas { background: #0e0e1a; border-radius: 4px; }
+
+  /* ── Validation panel ────────────────────────────────────────────────── */
+  #validate-panel {
+    position: fixed; top: 16px; right: 16px; z-index: 10;
+    background: rgba(10,10,20,0.92); border: 1px solid #333;
+    border-radius: 8px; padding: 14px; display: none;
+    max-width: 440px;
+  }
+  #validate-panel h2 { font-size: 15px; color: #7ec8e3; margin-bottom: 10px; }
+  .stats-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px;
+    font-size: 13px; margin-bottom: 10px;
+  }
+  .stats-grid .lbl { color: #888; }
+  .stats-grid .val { color: #fff; font-weight: bold; text-align: right; }
+  #validate-panel canvas { background: #0e0e1a; border-radius: 4px; margin-top: 6px; }
+  #validate-close {
+    position: absolute; top: 8px; right: 10px; background: none; border: none;
+    color: #888; font-size: 18px; cursor: pointer; width: auto; padding: 2px 6px;
+  }
+  #validate-close:hover { color: #fff; }
 
   /* ── Crosshair ───────────────────────────────────────────────────────── */
   #crosshair {
@@ -140,6 +170,21 @@
   <div class="row btn-row">
     <button id="btn-cross-section">Cross-Section</button>
   </div>
+  <div class="row">
+    <label>Calibrate with Reference DEM</label>
+    <div id="ref-btn" onclick="document.getElementById('ref-input').click()"
+         style="cursor:pointer;background:#1a2a1a;border:1px solid #4ac97e;border-radius:5px;padding:5px 10px;font-size:12px;color:#4ac97e;text-align:center;">
+      Upload GeoTIFF…</div>
+    <input type="file" id="ref-input" accept=".tif,.tiff" style="display:none">
+  </div>
+  <div class="row">
+    <label>Validate against Reference</label>
+    <div id="val-btn" onclick="document.getElementById('val-input').click()"
+         style="cursor:pointer;background:#2a1a2a;border:1px solid #c47ee3;border-radius:5px;padding:5px 10px;font-size:12px;color:#c47ee3;text-align:center;">
+      Upload Reference DEM…</div>
+    <input type="file" id="val-input" accept=".tif,.tiff" style="display:none">
+  </div>
+  <div id="provenance"></div>
   <div id="warning"></div>
   <div id="status">Ready — orbit: left drag · zoom: scroll · pan: right drag</div>
 </div>
@@ -154,6 +199,17 @@
 <!-- ── Cross-section profile ───────────────────────────────────────────── -->
 <div id="profile-panel">
   <canvas id="profile-canvas" width="400" height="180"></canvas>
+</div>
+
+<!-- ── Validation panel ────────────────────────────────────────────────── -->
+<div id="validate-panel">
+  <button id="validate-close">&times;</button>
+  <h2>Validation Results</h2>
+  <div class="stats-grid" id="stats-grid"></div>
+  <div style="display:flex;gap:8px;">
+    <canvas id="error-map-canvas" width="200" height="200"></canvas>
+    <canvas id="scatter-canvas" width="200" height="200"></canvas>
+  </div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
@@ -748,7 +804,11 @@ document.getElementById('file-input').addEventListener('change', async () => {
       status.textContent = err.detail || 'Model still loading — try again in a moment.';
       return;
     }
-    if (!resp.ok) { status.textContent = 'Server error: ' + resp.status; return; }
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => null);
+      status.textContent = (err && err.detail) ? err.detail : 'Server error: ' + resp.status;
+      return;
+    }
 
     const buf = await resp.arrayBuffer();
     const view = new DataView(buf);
@@ -810,12 +870,222 @@ document.getElementById('file-input').addEventListener('change', async () => {
     uniforms.uTexelSize.value = 1.0 / Math.max(width, height);
 
     status.textContent = `Loaded ${width}×${height} · ${min_height.toFixed(1)}–${max_height.toFixed(1)} m`;
+    updateProvenance(meta.provenance || 'relative');
 
   } catch (e) {
     console.error('[DepthWizard] upload error:', e);
     status.textContent = 'Error: ' + e.message;
   }
 });
+
+// ─── Provenance badge ───────────────────────────────────────────────────────
+function updateProvenance(prov) {
+  const el = document.getElementById('provenance');
+  const labels = {
+    'relative': ['RELATIVE', 'badge-relative'],
+    'geotiff-direct': ['GeoTIFF DIRECT', 'badge-geotiff'],
+    'srtm-calibrated': ['SRTM CALIBRATED', 'badge-calibrated'],
+  };
+  const [text, cls] = labels[prov] || ['RELATIVE', 'badge-relative'];
+  el.innerHTML = `<span class="badge ${cls}">${text}</span>`;
+}
+
+// ─── Reference DEM calibration upload ───────────────────────────────────────
+function applyResponseToViewer(buf) {
+  const view = new DataView(buf);
+  const metaLen = view.getUint32(0, true);
+  const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, metaLen)));
+  const { width, height, min_height, max_height } = meta;
+
+  const rawOff = 4 + metaLen;
+  const aligned = new ArrayBuffer(width * height * 4);
+  new Uint8Array(aligned).set(new Uint8Array(buf, rawOff, width * height * 4));
+  const floatData = new Float32Array(aligned);
+
+  currentFloatData = floatData;
+  currentMeta = meta;
+
+  const range = max_height - min_height || 1.0;
+  const rgba = new Uint8Array(width * height * 4);
+  for (let i = 0; i < width * height; i++) {
+    const norm = (floatData[i] - min_height) / range;
+    const val = Math.round(Math.min(Math.max(norm, 0.0), 1.0) * 65535);
+    rgba[i * 4 + 0] = (val >> 8) & 0xFF;
+    rgba[i * 4 + 1] = val & 0xFF;
+    rgba[i * 4 + 2] = 0;
+    rgba[i * 4 + 3] = 255;
+  }
+
+  const tex = new THREE.DataTexture(rgba, width, height, THREE.RGBAFormat, THREE.UnsignedByteType);
+  tex.minFilter = THREE.NearestFilter;
+  tex.magFilter = THREE.NearestFilter;
+  tex.needsUpdate = true;
+
+  uniforms.uHeightMap.value = tex;
+  uniforms.uMinHeight.value = min_height;
+  uniforms.uMaxHeight.value = max_height;
+  uniforms.uTexelSize.value = 1.0 / Math.max(width, height);
+
+  document.getElementById('status').textContent =
+    `Loaded ${width}×${height} · ${min_height.toFixed(1)}–${max_height.toFixed(1)} m`;
+  updateProvenance(meta.provenance || 'relative');
+}
+
+document.getElementById('ref-input').addEventListener('change', async () => {
+  const file = document.getElementById('ref-input').files[0];
+  if (!file) return;
+  const status = document.getElementById('status');
+  status.textContent = 'Calibrating with reference DEM…';
+
+  const formData = new FormData();
+  formData.append('reference', file);
+
+  try {
+    const resp = await fetch('/calibrate', { method: 'POST', body: formData });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      status.textContent = err.detail || 'Calibration failed';
+      return;
+    }
+    applyResponseToViewer(await resp.arrayBuffer());
+  } catch (e) {
+    status.textContent = 'Calibration error: ' + e.message;
+  }
+});
+
+// ─── Validation panel ───────────────────────────────────────────────────────
+document.getElementById('validate-close').addEventListener('click', () => {
+  document.getElementById('validate-panel').style.display = 'none';
+});
+
+document.getElementById('val-input').addEventListener('change', async () => {
+  const file = document.getElementById('val-input').files[0];
+  if (!file) return;
+  const status = document.getElementById('status');
+  status.textContent = 'Validating against reference DEM…';
+
+  const formData = new FormData();
+  formData.append('reference', file);
+
+  try {
+    const resp = await fetch('/validate', { method: 'POST', body: formData });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      status.textContent = err.detail || 'Validation failed';
+      return;
+    }
+    const data = await resp.json();
+    renderValidation(data);
+    status.textContent = 'Validation complete — see panel';
+  } catch (e) {
+    status.textContent = 'Validation error: ' + e.message;
+  }
+});
+
+function renderValidation(data) {
+  document.getElementById('validate-panel').style.display = 'block';
+
+  // Stats table
+  const grid = document.getElementById('stats-grid');
+  const stats = [
+    ['MAE', data.mae + ' m'],
+    ['RMSE', data.rmse + ' m'],
+    ['Median AE', data.median_ae + ' m'],
+    ['R²', data.r_squared],
+    ['Bias', data.bias + ' m'],
+  ];
+  grid.innerHTML = stats.map(([l, v]) =>
+    `<span class="lbl">${l}</span><span class="val">${v}</span>`
+  ).join('');
+
+  // Error map
+  const emCanvas = document.getElementById('error-map-canvas');
+  const emCtx = emCanvas.getContext('2d');
+  const w = data.width, h = data.height;
+  const errArr = data.error_map;
+  const cw = emCanvas.width, ch = emCanvas.height;
+  emCtx.clearRect(0, 0, cw, ch);
+
+  let eMin = Infinity, eMax = -Infinity;
+  for (let i = 0; i < errArr.length; i++) {
+    if (errArr[i] < eMin) eMin = errArr[i];
+    if (errArr[i] > eMax) eMax = errArr[i];
+  }
+  const eAbs = Math.max(Math.abs(eMin), Math.abs(eMax)) || 1;
+
+  const imgData = emCtx.createImageData(cw, ch);
+  for (let y = 0; y < ch; y++) {
+    for (let x = 0; x < cw; x++) {
+      const sx = Math.floor(x / cw * w), sy = Math.floor(y / ch * h);
+      const e = errArr[sy * w + sx] || 0;
+      const t = e / eAbs; // [-1, 1]
+      let r, g, b;
+      if (t < 0) { r = 0; g = 0; b = Math.round(-t * 200); }
+      else       { r = Math.round(t * 200); g = 0; b = 0; }
+      const off = (y * cw + x) * 4;
+      imgData.data[off] = r; imgData.data[off+1] = g;
+      imgData.data[off+2] = b; imgData.data[off+3] = 255;
+    }
+  }
+  emCtx.putImageData(imgData, 0, 0);
+
+  // Labels
+  emCtx.fillStyle = '#7ec8e3';
+  emCtx.font = 'bold 11px Arial';
+  emCtx.fillText('Error Map', 4, 12);
+  emCtx.fillStyle = '#66f';
+  emCtx.fillText('Blue: under', 4, ch - 16);
+  emCtx.fillStyle = '#f66';
+  emCtx.fillText('Red: over', 4, ch - 4);
+
+  // Scatter plot
+  const scCanvas = document.getElementById('scatter-canvas');
+  const scCtx = scCanvas.getContext('2d');
+  const sw = scCanvas.width, sh = scCanvas.height;
+  scCtx.clearRect(0, 0, sw, sh);
+  scCtx.fillStyle = '#0e0e1a';
+  scCtx.fillRect(0, 0, sw, sh);
+
+  const preds = data.scatter_pred, refs = data.scatter_ref;
+  let allMin = Infinity, allMax = -Infinity;
+  for (let i = 0; i < preds.length; i++) {
+    allMin = Math.min(allMin, preds[i], refs[i]);
+    allMax = Math.max(allMax, preds[i], refs[i]);
+  }
+  const range = allMax - allMin || 1;
+  const margin = 30;
+
+  // 1:1 line
+  scCtx.strokeStyle = '#444';
+  scCtx.lineWidth = 1;
+  scCtx.beginPath();
+  scCtx.moveTo(margin, sh - margin);
+  scCtx.lineTo(sw - 5, 5);
+  scCtx.stroke();
+
+  // Points
+  scCtx.fillStyle = 'rgba(126, 200, 227, 0.4)';
+  for (let i = 0; i < preds.length; i++) {
+    const x = margin + (refs[i] - allMin) / range * (sw - margin - 5);
+    const y = (sh - margin) - (preds[i] - allMin) / range * (sh - margin - 5);
+    scCtx.beginPath();
+    scCtx.arc(x, y, 2, 0, Math.PI * 2);
+    scCtx.fill();
+  }
+
+  // Labels
+  scCtx.fillStyle = '#7ec8e3';
+  scCtx.font = 'bold 11px Arial';
+  scCtx.fillText('Pred vs Ref', 32, 14);
+  scCtx.fillStyle = '#888';
+  scCtx.font = '10px Arial';
+  scCtx.save();
+  scCtx.translate(10, sh / 2);
+  scCtx.rotate(-Math.PI / 2);
+  scCtx.fillText('Predicted', 0, 0);
+  scCtx.restore();
+  scCtx.fillText('Reference', sw / 2 - 20, sh - 4);
+}
 
 // ─── Resize + render loop ───────────────────────────────────────────────────
 window.addEventListener('resize', () => {

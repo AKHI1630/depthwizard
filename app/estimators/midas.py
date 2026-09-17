@@ -33,7 +33,21 @@ class MidasEstimator(HeightEstimator):
         logger.info("MiDaS_small loaded in %.1f s", time.perf_counter() - t0)
 
     def estimate(self, image_bytes: bytes) -> Tuple[np.ndarray, HeightMetadata]:
-        img_pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        try:
+            img_pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        except Exception as e:
+            raise ValueError(f"Cannot decode image: {e}") from e
+
+        w, h = img_pil.size
+        logger.info("Input image: %d×%d", w, h)
+
+        if w < 16 or h < 16:
+            raise ValueError(f"Image too small ({w}×{h}). Minimum 16×16.")
+        if w > 8192 or h > 8192:
+            scale = 8192 / max(w, h)
+            img_pil = img_pil.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            logger.info("Resized large image to %d×%d", img_pil.size[0], img_pil.size[1])
+
         img_np = np.array(img_pil)
 
         inp = self._transform(img_np)
