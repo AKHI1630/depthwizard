@@ -125,7 +125,8 @@
   <div class="row">
     <label>Estimator</label>
     <select id="estimator-select">
-      <option value="midas" selected>MiDaS Small</option>
+      <option value="depth_anything" selected>Depth Anything V2</option>
+      <option value="midas">MiDaS Small</option>
       <option value="synthetic">Synthetic (debug)</option>
     </select>
   </div>
@@ -133,6 +134,11 @@
     <input type="checkbox" id="detrend-check" checked style="accent-color:#7ec8e3;width:16px;height:16px;">
     <label for="detrend-check" style="margin:0;cursor:pointer;">Remove low-freq ramp (detrend)</label>
   </div>
+  <div class="row" style="display:flex;align-items:center;gap:8px;">
+    <input type="checkbox" id="structure-check" style="accent-color:#f4a261;width:16px;height:16px;">
+    <label for="structure-check" style="margin:0;cursor:pointer;">Structure-aware DSM</label>
+  </div>
+  <div id="structure-info" style="display:none;font-size:12px;color:#f4a261;margin-bottom:8px;"></div>
   <div class="row">
     <label for="file-btn">Upload Image</label>
     <div id="file-btn" onclick="document.getElementById('file-input').click()">Choose file…</div>
@@ -156,6 +162,7 @@
       <option value="0" selected>None</option>
       <option value="1">Slope</option>
       <option value="2">Hillshade only</option>
+      <option value="3">Segmentation classes</option>
     </select>
   </div>
   <div class="row">
@@ -385,6 +392,7 @@ const vertexShader = `
 
 const fragmentShader = `
   uniform sampler2D uPalette;
+  uniform sampler2D uSegMap;
   uniform float uPaletteRow;
   uniform int   uOverlay;
 
@@ -394,14 +402,12 @@ const fragmentShader = `
   varying vec2  vUv;
 
   void main() {
-    // Sample palette texture: u = height [0,1], v = (row+0.5)/3.0
     float palV = (uPaletteRow + 0.5) / 3.0;
     vec3 baseCol = texture2D(uPalette, vec2(vNormHeight, palV)).rgb;
 
     float shade = 0.35 + 0.65 * vDiffuse;
 
     if (uOverlay == 1) {
-      // Slope overlay: 0–45° mapped to green→yellow→red
       float s = clamp(vSlope / 45.0, 0.0, 1.0);
       vec3 slopeCol;
       if (s < 0.5) {
@@ -411,8 +417,11 @@ const fragmentShader = `
       }
       gl_FragColor = vec4(slopeCol * shade, 1.0);
     } else if (uOverlay == 2) {
-      // Hillshade only — greyscale
       gl_FragColor = vec4(vec3(shade), 1.0);
+    } else if (uOverlay == 3) {
+      vec4 seg = texture2D(uSegMap, vUv);
+      vec3 blended = mix(baseCol, seg.rgb, seg.a * 0.7);
+      gl_FragColor = vec4(blended * shade, 1.0);
     } else {
       gl_FragColor = vec4(baseCol * shade, 1.0);
     }
@@ -428,6 +437,13 @@ heightTexture.needsUpdate = true;
 
 const paletteTexture = buildPaletteTexture();
 
+// Placeholder 2x2 for segmentation overlay
+const segPlaceholder = new Uint8Array(2 * 2 * 4);
+const segTexture = new THREE.DataTexture(segPlaceholder, 2, 2, THREE.RGBAFormat, THREE.UnsignedByteType);
+segTexture.minFilter = THREE.NearestFilter;
+segTexture.magFilter = THREE.NearestFilter;
+segTexture.needsUpdate = true;
+
 const uniforms = {
   uHeightMap:    { value: heightTexture },
   uExaggeration: { value: 2.0 },
@@ -435,6 +451,7 @@ const uniforms = {
   uMaxHeight:    { value: 1.0 },
   uTexelSize:    { value: 0.5 },
   uPalette:      { value: paletteTexture },
+  uSegMap:       { value: segTexture },
   uPaletteRow:   { value: 0.0 },
   uOverlay:      { value: 0 },
 };
@@ -799,11 +816,12 @@ document.getElementById('file-input').addEventListener('change', async () => {
 
   const estimator = document.getElementById('estimator-select').value;
   const detrend = document.getElementById('detrend-check').checked;
+  const structure = document.getElementById('structure-check').checked;
   const formData = new FormData();
   formData.append('file', file);
 
   try {
-    const resp = await fetch(`/upload?estimator=${estimator}&detrend=${detrend}`, { method: 'POST', body: formData });
+    const resp = await fetch(`/upload?estimator=${estimator}&detrend=${detrend}&structure=${structure}`, { method: 'POST', body: formData });
     if (resp.status === 503) {
       const err = await resp.json().catch(() => ({}));
       status.textContent = err.detail || 'Model still loading — try again in a moment.';
@@ -876,6 +894,41 @@ document.getElementById('file-input').addEventListener('change', async () => {
 
     status.textContent = `Loaded ${width}×${height} · ${min_height.toFixed(1)}–${max_height.toFixed(1)} m`;
     updateProvenance(meta.provenance || 'relative');
+
+    // Structure-aware stats
+    const structInfo = document.getElementById('structure-info');
+    if (meta.structure_stats) {
+      const s = meta.structure_stats;
+      const bldg = s.BUILDING || { count: 0, mean_height: 0 };
+      structInfo.innerHTML = `Buildings: ${bldg.count} regions · ` +
+        `${bldg.mean_height.toFixed(1)} m avg`;
+      structInfo.style.display = 'block';
+      // Fetch segmentation overlay as texture
+      fetch('/structure-map').then(r => r.ok ? r.blob() : null).then(blob => {
+        if (!blob) return;
+        const img = new window.Image();
+        img.onload = () => {
+          const c = document.createElement('canvas');
+          c.width = img.width; c.height = img.height;
+          const ctx = c.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+          const px = ctx.getImageData(0, 0, c.width, c.height);
+          const segTex = new THREE.DataTexture(
+            new Uint8Array(px.data), c.width, c.height,
+            THREE.RGBAFormat, THREE.UnsignedByteType
+          );
+          segTex.minFilter = THREE.NearestFilter;
+          segTex.magFilter = THREE.NearestFilter;
+          segTex.needsUpdate = true;
+          uniforms.uSegMap.value = segTex;
+          console.log('[DepthWizard] Segmentation overlay loaded', c.width, c.height);
+        };
+        img.src = URL.createObjectURL(blob);
+      });
+    } else {
+      structInfo.style.display = 'none';
+      window._segOverlay = null;
+    }
 
   } catch (e) {
     console.error('[DepthWizard] upload error:', e);

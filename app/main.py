@@ -25,6 +25,7 @@ from .calibration import (
 )
 from .estimators.base import HeightEstimator
 from .estimators.synthetic import SyntheticEstimator
+from .structure_dsm import structure_aware_dsm
 from .validation import validate as run_validation
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -43,34 +44,52 @@ class ModelStatus(str, Enum):
 
 
 _synthetic = SyntheticEstimator()
+_depth_anything: HeightEstimator | None = None
 _midas: HeightEstimator | None = None
 _model_status: ModelStatus = ModelStatus.LOADING
 _model_error: str = ""
+_da_error: str = ""
 
 
-def _load_midas() -> None:
-    global _midas, _model_status, _model_error
+def _load_models() -> None:
+    global _depth_anything, _midas, _model_status, _model_error, _da_error
+
+    # Primary: Depth Anything V2 (local weights)
+    try:
+        from .estimators.depth_anything import DepthAnythingEstimator
+        _depth_anything = DepthAnythingEstimator()
+        logger.info("Depth-Anything-V2-Small loaded successfully.")
+    except Exception as exc:
+        _da_error = str(exc)
+        logger.warning("Depth Anything V2 failed to load: %s", exc)
+
+    # Secondary: MiDaS (torch.hub)
     try:
         from .estimators.midas import MidasEstimator
         _midas = MidasEstimator()
-        _model_status = ModelStatus.READY
-        logger.info("=" * 60)
-        logger.info("DepthWizard ready — MiDaS_small loaded, accepting requests.")
-        logger.info("=" * 60)
+        logger.info("MiDaS_small loaded successfully.")
     except Exception as exc:
+        logger.warning("MiDaS failed to load: %s", exc)
+
+    if _depth_anything or _midas:
+        _model_status = ModelStatus.READY
+        primary = "Depth-Anything-V2" if _depth_anything else "MiDaS_small"
+        logger.info("=" * 60)
+        logger.info("DepthWizard ready — %s loaded, accepting requests.", primary)
+        logger.info("=" * 60)
+    else:
         _model_status = ModelStatus.FAILED
-        _model_error = str(exc)
+        _model_error = f"All models failed. DA: {_da_error}"
         logger.error("=" * 60)
-        logger.error("MiDaS failed to load — /upload?estimator=midas will fall back to synthetic.")
-        logger.error("Reason: %s", exc)
+        logger.error("All depth models failed — only synthetic available.")
         logger.error("=" * 60)
 
 
 @app.on_event("startup")
 async def startup() -> None:
-    t = threading.Thread(target=_load_midas, name="model-loader", daemon=True)
+    t = threading.Thread(target=_load_models, name="model-loader", daemon=True)
     t.start()
-    logger.info("Server ready. MiDaS loading in background — watch for the 'DepthWizard ready' line.")
+    logger.info("Server ready. Models loading in background — watch for the 'DepthWizard ready' line.")
 
 
 # ── Estimator selection ───────────────────────────────────────────────────────
@@ -84,17 +103,40 @@ def _pick_estimator(name: str) -> tuple[HeightEstimator, str]:
             status_code=503,
             detail="Model still loading — please try again in a moment.",
         )
-    if _model_status is ModelStatus.FAILED:
-        return _synthetic, f"MiDaS failed to load ({_model_error}); using synthetic instead."
-    return _midas, ""  # type: ignore[return-value]
+
+    if name == "depth_anything":
+        if _depth_anything:
+            return _depth_anything, ""
+        if _midas:
+            return _midas, f"Depth Anything V2 unavailable ({_da_error}); using MiDaS instead."
+        return _synthetic, f"All depth models failed ({_da_error}); using synthetic."
+
+    if name == "midas":
+        if _midas:
+            return _midas, ""
+        if _depth_anything:
+            return _depth_anything, "MiDaS unavailable; using Depth Anything instead."
+        return _synthetic, f"All depth models failed ({_model_error}); using synthetic."
+
+    if _depth_anything:
+        return _depth_anything, ""
+    if _midas:
+        return _midas, f"Depth Anything V2 unavailable ({_da_error}); using MiDaS."
+    return _synthetic, f"All depth models failed; using synthetic."
 
 
 # ── /health ───────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health() -> JSONResponse:
-    body = {"model_status": _model_status.value}
+    body = {
+        "model_status": _model_status.value,
+        "depth_anything": "ready" if _depth_anything else ("failed" if _da_error else "not_loaded"),
+        "midas": "ready" if _midas else "not_loaded",
+    }
     if _model_error:
         body["model_error"] = _model_error
+    if _da_error:
+        body["da_error"] = _da_error
     status_code = 200 if _model_status is ModelStatus.READY else 503
     return JSONResponse(content=body, status_code=status_code)
 
@@ -111,6 +153,7 @@ def _pack_response(height_array: np.ndarray, meta_dict: dict) -> Response:
 
 
 _last_prediction: dict = {}
+_last_image_bytes: bytes = b""
 
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
@@ -120,9 +163,11 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 @app.post("/upload")
 async def upload(
     file: UploadFile = File(...),
-    estimator: Literal["midas", "synthetic"] = Query(default="midas"),
+    estimator: Literal["depth_anything", "midas", "synthetic"] = Query(default="depth_anything"),
     detrend: bool = Query(default=True),
+    structure: bool = Query(default=False),
 ) -> Response:
+    global _last_image_bytes
     image_bytes = await file.read()
 
     if len(image_bytes) == 0:
@@ -154,8 +199,21 @@ async def upload(
         logger.error("Estimator failed: %s", e, exc_info=True)
         raise HTTPException(500, f"Depth estimation failed: {e}")
 
+    _last_image_bytes = image_bytes
+
+    if structure:
+        from PIL import Image as PILImage
+        import io as _io
+        img_pil = PILImage.open(_io.BytesIO(image_bytes)).convert("RGB")
+        structured, class_map, stats = structure_aware_dsm(height_array, img_pil)
+        height_array = structured
+        _last_prediction["class_map"] = class_map
+        _last_prediction["structure_stats"] = stats
+
     meta_dict = meta.to_dict()
     meta_dict["provenance"] = "relative"
+    if structure:
+        meta_dict["structure_stats"] = _last_prediction.get("structure_stats", {})
     if warning:
         meta_dict["warning"] = warning
         logger.warning("Fallback active: %s", warning)
@@ -199,6 +257,36 @@ async def validate_endpoint(reference: UploadFile = File(...)) -> JSONResponse:
     result["error_map"] = error_map_list
 
     return JSONResponse(content=result)
+
+
+# ── /structure-map ──────────────────────────────────────────────────────────
+@app.get("/structure-map")
+async def structure_map() -> Response:
+    """Return the last segmentation class map as a color-coded PNG."""
+    import io as _io
+    from PIL import Image as PILImage
+
+    if "class_map" not in _last_prediction:
+        raise HTTPException(400, "No structure map — upload with ?structure=true first.")
+
+    cmap = _last_prediction["class_map"]
+    h, w = cmap.shape
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    # BUILDING=0 red, ROAD=1 gray, VEGETATION=2 green, GROUND=3 brown
+    colors = {
+        0: (220, 50, 50, 180),
+        1: (140, 140, 140, 180),
+        2: (50, 180, 50, 180),
+        3: (160, 120, 80, 180),
+    }
+    for cls, color in colors.items():
+        mask = cmap == cls
+        rgba[mask] = color
+
+    img = PILImage.fromarray(rgba, "RGBA")
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+    return Response(content=buf.getvalue(), media_type="image/png")
 
 
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
