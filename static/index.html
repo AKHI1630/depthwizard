@@ -8,55 +8,251 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #0a0a12; color: #e0e0e0; font-family: Arial, sans-serif; overflow: hidden; }
   #canvas-container { width: 100vw; height: 100vh; }
-  #ui {
-    position: fixed; top: 16px; left: 16px; z-index: 10;
-    background: rgba(10,10,20,0.82); border: 1px solid #333;
-    border-radius: 8px; padding: 14px 18px; min-width: 220px;
+
+  /* ── Main control panel ──────────────────────────────────────────────── */
+  .panel {
+    position: fixed; z-index: 10;
+    background: rgba(10,10,20,0.88); border: 1px solid #333;
+    border-radius: 8px; padding: 14px 18px;
     backdrop-filter: blur(6px);
+    font-size: 14px;
   }
-  #ui h1 { font-size: 15px; font-weight: bold; color: #7ec8e3; margin-bottom: 12px; letter-spacing: 0.05em; }
-  label { display: block; font-size: 12px; color: #aaa; margin-bottom: 3px; }
+  #ui { top: 16px; left: 16px; min-width: 240px; }
+  #ui h1 { font-size: 17px; font-weight: bold; color: #7ec8e3; margin-bottom: 12px; letter-spacing: 0.05em; }
+  label { display: block; font-size: 13px; color: #bbb; margin-bottom: 3px; }
   input[type=range] { width: 100%; accent-color: #7ec8e3; }
-  #ve-value { font-size: 12px; color: #7ec8e3; float: right; }
+  .val { font-size: 13px; color: #7ec8e3; float: right; }
   .row { margin-bottom: 12px; }
+  select, button {
+    width: 100%; background: #1a1a2e; color: #e0e0e0;
+    border: 1px solid #444; border-radius: 4px; padding: 5px 8px;
+    font-size: 13px; cursor: pointer;
+  }
+  button { background: #1e3a5f; border-color: #7ec8e3; color: #7ec8e3; transition: background 0.2s; }
+  button:hover { background: #2a5080; }
+  .btn-row { display: flex; gap: 6px; }
+  .btn-row button { flex: 1; }
   #file-btn {
     display: inline-block; cursor: pointer; background: #1e3a5f;
     border: 1px solid #7ec8e3; border-radius: 5px; padding: 6px 12px;
-    font-size: 12px; color: #7ec8e3; width: 100%; text-align: center;
+    font-size: 13px; color: #7ec8e3; width: 100%; text-align: center;
     transition: background 0.2s;
   }
   #file-btn:hover { background: #2a5080; }
   #file-input { display: none; }
-  #status { font-size: 11px; color: #888; margin-top: 8px; min-height: 16px; }
+  #status { font-size: 12px; color: #999; margin-top: 8px; min-height: 16px; }
+  #warning { display: none; font-size: 12px; color: #f4a261; margin-top: 6px; }
+
+  /* ── Info panel (bottom-left) ────────────────────────────────────────── */
+  #info-panel {
+    position: fixed; bottom: 16px; left: 16px; z-index: 10;
+    background: rgba(10,10,20,0.88); border: 1px solid #333;
+    border-radius: 8px; padding: 10px 14px;
+    backdrop-filter: blur(6px); font-size: 13px; color: #bbb;
+    min-width: 200px;
+  }
+  #info-panel .label { color: #7ec8e3; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  #info-panel .val-big { font-size: 22px; color: #fff; font-weight: bold; }
+  #info-panel .val-unit { font-size: 13px; color: #888; }
+
+  /* ── Cross-section overlay ───────────────────────────────────────────── */
+  #profile-panel {
+    position: fixed; bottom: 16px; right: 16px; z-index: 10;
+    background: rgba(10,10,20,0.92); border: 1px solid #333;
+    border-radius: 8px; padding: 10px; display: none;
+  }
+  #profile-canvas { background: #0e0e1a; border-radius: 4px; }
+
+  /* ── Crosshair ───────────────────────────────────────────────────────── */
+  #crosshair {
+    position: fixed; top: 50%; left: 50%; z-index: 20;
+    width: 24px; height: 24px; margin: -12px 0 0 -12px;
+    pointer-events: none; display: none;
+  }
+  #crosshair::before, #crosshair::after {
+    content: ''; position: absolute; background: rgba(255,255,255,0.6);
+  }
+  #crosshair::before { width: 2px; height: 100%; left: 50%; transform: translateX(-50%); }
+  #crosshair::after  { height: 2px; width: 100%; top: 50%; transform: translateY(-50%); }
+
+  /* ── Camera hint ─────────────────────────────────────────────────────── */
+  #cam-hint {
+    position: fixed; bottom: 50px; left: 50%; transform: translateX(-50%);
+    z-index: 15; font-size: 13px; color: #7ec8e3; background: rgba(10,10,20,0.8);
+    padding: 6px 14px; border-radius: 6px; display: none;
+    pointer-events: none; white-space: nowrap;
+  }
 </style>
 </head>
 <body>
 <div id="canvas-container"></div>
-<div id="ui">
+<div id="crosshair"></div>
+<div id="cam-hint"></div>
+
+<!-- ── Main UI ──────────────────────────────────────────────────────────── -->
+<div id="ui" class="panel">
   <h1>DepthWizard</h1>
   <div class="row">
-    <label>Vertical Exaggeration <span id="ve-value">2.0×</span></label>
-    <input type="range" id="ve-slider" min="0.1" max="10" step="0.1" value="2.0">
-  </div>
-  <div class="row">
     <label>Estimator</label>
-    <select id="estimator-select" style="width:100%;background:#1a1a2e;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:4px 6px;font-size:12px;">
-      <option value="depth" selected>Depth-Anything-V2-Small</option>
+    <select id="estimator-select">
+      <option value="midas" selected>MiDaS Small</option>
       <option value="synthetic">Synthetic (debug)</option>
     </select>
   </div>
   <div class="row">
     <label for="file-btn">Upload Image</label>
     <div id="file-btn" onclick="document.getElementById('file-input').click()">Choose file…</div>
-    <input type="file" id="file-input" accept="image/*">
+    <input type="file" id="file-input" accept="image/*,.tif,.tiff">
   </div>
-  <div id="warning" style="display:none;font-size:11px;color:#f4a261;margin-top:6px;"></div>
+  <div class="row">
+    <label>Vertical Exaggeration <span class="val" id="ve-value">2.0×</span></label>
+    <input type="range" id="ve-slider" min="0.1" max="10" step="0.1" value="2.0">
+  </div>
+  <div class="row">
+    <label>Color Palette</label>
+    <select id="palette-select">
+      <option value="0" selected>Viridis</option>
+      <option value="1">Cividis</option>
+      <option value="2">Terrain</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>Overlay</label>
+    <select id="overlay-select">
+      <option value="0" selected>None</option>
+      <option value="1">Slope</option>
+      <option value="2">Hillshade only</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>Camera Mode</label>
+    <select id="camera-select">
+      <option value="orbit" selected>Orbit</option>
+      <option value="fps">First Person (WASD)</option>
+      <option value="aerial">Aerial (top-down)</option>
+      <option value="flythrough">Waypoint Flythrough</option>
+    </select>
+  </div>
+  <div class="row btn-row">
+    <button id="btn-reset-cam">Reset Camera</button>
+    <button id="btn-measure">Measure</button>
+  </div>
+  <div class="row btn-row">
+    <button id="btn-cross-section">Cross-Section</button>
+  </div>
+  <div id="warning"></div>
   <div id="status">Ready — orbit: left drag · zoom: scroll · pan: right drag</div>
+</div>
+
+<!-- ── Measurement info panel ──────────────────────────────────────────── -->
+<div id="info-panel" style="display:none;">
+  <div class="label">Height at cursor</div>
+  <div><span class="val-big" id="measure-val">—</span> <span class="val-unit" id="measure-unit">m</span></div>
+  <div style="margin-top:6px;font-size:12px;color:#666;" id="measure-coords"></div>
+</div>
+
+<!-- ── Cross-section profile ───────────────────────────────────────────── -->
+<div id="profile-panel">
+  <canvas id="profile-canvas" width="400" height="180"></canvas>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/controls/OrbitControls.js"></script>
 <script>
+// ─── Constants ──────────────────────────────────────────────────────────────
+const GRID = 512, PLANE_SIZE = 900;
+const DEFAULT_CAM = { pos: [0, 400, 700], target: [0, 0, 0] };
+
+// ─── Viridis & Cividis LUTs (64 stops, sampled from matplotlib) ─────────
+const VIRIDIS = [
+  [0.267,0.004,0.329],[0.281,0.085,0.415],[0.278,0.140,0.457],[0.269,0.190,0.488],
+  [0.254,0.236,0.510],[0.236,0.279,0.525],[0.216,0.318,0.534],[0.196,0.355,0.539],
+  [0.177,0.390,0.540],[0.158,0.423,0.537],[0.141,0.455,0.532],[0.127,0.486,0.524],
+  [0.120,0.516,0.512],[0.117,0.546,0.498],[0.120,0.575,0.481],[0.131,0.603,0.461],
+  [0.153,0.631,0.437],[0.185,0.657,0.410],[0.225,0.681,0.381],[0.272,0.704,0.349],
+  [0.324,0.725,0.314],[0.381,0.744,0.277],[0.441,0.761,0.239],[0.502,0.776,0.200],
+  [0.564,0.790,0.160],[0.625,0.802,0.122],[0.685,0.813,0.088],[0.742,0.822,0.063],
+  [0.796,0.831,0.050],[0.845,0.839,0.052],[0.890,0.848,0.072],[0.930,0.858,0.109],
+  [0.960,0.870,0.156],[0.981,0.884,0.211],[0.993,0.901,0.271],[0.998,0.918,0.334],
+  [0.997,0.935,0.397],[0.990,0.951,0.460],[0.979,0.965,0.521],[0.964,0.978,0.579],
+  [0.267,0.004,0.329],[0.282,0.060,0.390],[0.276,0.117,0.439],[0.266,0.168,0.474],
+  [0.252,0.215,0.502],[0.238,0.258,0.522],[0.222,0.298,0.536],[0.204,0.336,0.539],
+  [0.185,0.372,0.541],[0.167,0.407,0.539],[0.151,0.440,0.534],[0.137,0.472,0.526],
+  [0.128,0.503,0.516],[0.124,0.533,0.503],[0.126,0.562,0.488],[0.135,0.591,0.470],
+  [0.153,0.618,0.448],[0.180,0.644,0.424],[0.216,0.669,0.396],[0.259,0.692,0.366],
+  [0.307,0.714,0.334],[0.360,0.734,0.299],[0.417,0.753,0.262],[0.476,0.770,0.224],
+  [0.537,0.785,0.185],[0.598,0.798,0.147],[0.658,0.810,0.112],[0.717,0.820,0.083],
+  [0.773,0.829,0.063],[0.826,0.837,0.055],[0.874,0.845,0.062],[0.917,0.854,0.085],
+];
+
+const CIVIDIS = [
+  [0.000,0.135,0.305],[0.000,0.155,0.335],[0.024,0.175,0.354],[0.071,0.194,0.365],
+  [0.107,0.213,0.372],[0.137,0.231,0.376],[0.163,0.249,0.379],[0.186,0.266,0.381],
+  [0.208,0.284,0.383],[0.228,0.301,0.384],[0.247,0.318,0.386],[0.266,0.335,0.387],
+  [0.284,0.352,0.389],[0.302,0.369,0.391],[0.320,0.386,0.392],[0.338,0.403,0.394],
+  [0.356,0.420,0.395],[0.374,0.437,0.396],[0.392,0.455,0.396],[0.411,0.472,0.396],
+  [0.430,0.489,0.395],[0.449,0.506,0.393],[0.469,0.524,0.390],[0.489,0.541,0.385],
+  [0.510,0.558,0.379],[0.532,0.575,0.371],[0.554,0.592,0.361],[0.577,0.609,0.349],
+  [0.601,0.626,0.335],[0.626,0.643,0.318],[0.651,0.660,0.298],[0.678,0.676,0.275],
+  [0.705,0.693,0.249],[0.733,0.709,0.220],[0.762,0.726,0.186],[0.791,0.742,0.149],
+  [0.821,0.758,0.108],[0.851,0.775,0.060],[0.882,0.791,0.000],[0.913,0.807,0.000],
+  [0.000,0.135,0.305],[0.000,0.147,0.322],[0.009,0.159,0.337],[0.048,0.171,0.349],
+  [0.082,0.183,0.358],[0.111,0.195,0.366],[0.137,0.207,0.372],[0.161,0.219,0.376],
+  [0.183,0.231,0.380],[0.203,0.243,0.383],[0.222,0.255,0.385],[0.241,0.267,0.387],
+  [0.259,0.279,0.389],[0.276,0.292,0.390],[0.293,0.304,0.391],[0.310,0.316,0.392],
+  [0.326,0.329,0.393],[0.343,0.341,0.393],[0.359,0.354,0.394],[0.375,0.366,0.394],
+  [0.392,0.379,0.393],[0.408,0.392,0.393],[0.425,0.405,0.392],[0.442,0.418,0.390],
+  [0.459,0.431,0.388],[0.477,0.444,0.385],[0.495,0.457,0.381],[0.514,0.470,0.376],
+  [0.533,0.484,0.370],[0.552,0.497,0.363],[0.572,0.510,0.354],[0.593,0.524,0.344],
+];
+
+// Palette texture: each palette = one row, 64 texels wide
+function buildPaletteTexture() {
+  const W = 64, H = 3;
+  const data = new Uint8Array(W * H * 4);
+  // Row 0: viridis (first 40 entries, stretched)
+  // Row 1: cividis (first 40 entries, stretched)
+  // Row 2: terrain (procedural)
+  const palettes = [VIRIDIS, CIVIDIS];
+  for (let row = 0; row < 2; row++) {
+    const lut = palettes[row];
+    for (let i = 0; i < W; i++) {
+      const idx = Math.min(Math.floor(i / W * 40), 39);
+      const c = lut[idx];
+      const off = (row * W + i) * 4;
+      data[off+0] = Math.round(c[0]*255);
+      data[off+1] = Math.round(c[1]*255);
+      data[off+2] = Math.round(c[2]*255);
+      data[off+3] = 255;
+    }
+  }
+  // Row 2: terrain (blue→green→brown→white)
+  for (let i = 0; i < W; i++) {
+    const t = i / (W - 1);
+    let r, g, b;
+    if (t < 0.33) {
+      const s = t / 0.33;
+      r = 0.05 + s*0.08; g = 0.12 + s*0.31; b = 0.35 - s*0.17;
+    } else if (t < 0.66) {
+      const s = (t - 0.33) / 0.33;
+      r = 0.13 + s*0.49; g = 0.43 + s*0.09; b = 0.18 + s*0.12;
+    } else {
+      const s = (t - 0.66) / 0.34;
+      r = 0.62 + s*0.33; g = 0.52 + s*0.43; b = 0.30 + s*0.65;
+    }
+    const off = (2 * W + i) * 4;
+    data[off+0] = Math.round(r*255);
+    data[off+1] = Math.round(g*255);
+    data[off+2] = Math.round(b*255);
+    data[off+3] = 255;
+  }
+  const tex = new THREE.DataTexture(data, W, H, THREE.RGBAFormat, THREE.UnsignedByteType);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
 // ─── Renderer ───────────────────────────────────────────────────────────────
 const container = document.getElementById('canvas-container');
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -64,8 +260,6 @@ renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 container.appendChild(renderer.domElement);
 
-// Float textures are not universally supported (WebGL 1 / mobile).
-// We use RGBA UnsignedByte with RG-packed 16-bit heights instead.
 console.log('[DepthWizard] Using RG-packed RGBA Uint8 heightmap — no float texture dependency.');
 
 const scene = new THREE.Scene();
@@ -73,31 +267,26 @@ scene.background = new THREE.Color(0x0a0a12);
 scene.fog = new THREE.Fog(0x0a0a12, 800, 2000);
 
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 5000);
-camera.position.set(0, 400, 700);
-camera.lookAt(0, 0, 0);
+camera.position.set(...DEFAULT_CAM.pos);
+camera.lookAt(new THREE.Vector3(...DEFAULT_CAM.target));
 
-const controls = new THREE.OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.08;
+const orbitControls = new THREE.OrbitControls(camera, renderer.domElement);
+orbitControls.enableDamping = true;
+orbitControls.dampingFactor = 0.08;
 
 // ─── Shaders ────────────────────────────────────────────────────────────────
-// Heights are RG-packed 16-bit in an RGBA Uint8 texture.
-// Pack (JS): val = round(norm * 65535); R = val >> 8; G = val & 0xFF
-// Unpack (GLSL): h = (texel.r*255.0*256.0 + texel.g*255.0) / 65535.0
-// NearestFilter is mandatory — bilinear filtering blends R and G bytes,
-// corrupting the unpacked value at edges.
 const vertexShader = `
   uniform sampler2D uHeightMap;
   uniform float uExaggeration;
   uniform float uMinHeight;
   uniform float uMaxHeight;
-  uniform float uTexelSize;   // 1.0 / max(width, height)
+  uniform float uTexelSize;
 
-  varying float vNormHeight;  // [0,1] for colour ramp
-  varying float vDiffuse;     // Lambertian term
+  varying float vNormHeight;
+  varying float vDiffuse;
+  varying float vSlope;
+  varying vec2  vUv;
 
-  // Unpack 16-bit height from RG channels of a Uint8 RGBA texture.
-  // WebGL normalises Uint8 channels to [0,1], so byte = channel * 255.
   float unpackHeight(vec2 uv) {
     vec4 t = texture2D(uHeightMap, uv);
     return (t.r * 255.0 * 256.0 + t.g * 255.0) / 65535.0;
@@ -107,9 +296,6 @@ const vertexShader = `
     vec2 uv = uv;
     float h = unpackHeight(uv);
 
-    // Central-difference normals — four neighbours at texel-step distance.
-    // Scale differences by the same factor as displacement so normals
-    // track the exaggerated surface, not the flat normalised one.
     float eps = uTexelSize;
     float hL = unpackHeight(uv + vec2(-eps,  0.0));
     float hR = unpackHeight(uv + vec2( eps,  0.0));
@@ -120,11 +306,16 @@ const vertexShader = `
     float scale = range * uExaggeration;
     vec3 normal = normalize(vec3((hL - hR) * scale, 2.0, (hD - hU) * scale));
 
-    // sunDir inside main() — GLSL ES forbids function calls in global initialisers
     vec3 sunDir = normalize(vec3(0.6, 1.0, 0.5));
     vDiffuse = max(dot(normal, sunDir), 0.0);
 
-    vNormHeight = h;  // [0,1]
+    // Slope: angle in degrees
+    float dzdx = (hR - hL) / (2.0 * eps) * range;
+    float dzdy = (hU - hD) / (2.0 * eps) * range;
+    vSlope = atan(sqrt(dzdx*dzdx + dzdy*dzdy)) * 57.2958;
+
+    vNormHeight = h;
+    vUv = uv;
 
     float worldH = h * scale;
     vec3 displaced = position + vec3(0.0, worldH, 0.0);
@@ -133,41 +324,49 @@ const vertexShader = `
 `;
 
 const fragmentShader = `
+  uniform sampler2D uPalette;
+  uniform float uPaletteRow;
+  uniform int   uOverlay;
+
   varying float vNormHeight;
   varying float vDiffuse;
-
-  // Step 4: debug height ramp — dark blue (low) → bright white (high)
-  vec3 heightRamp(float t) {
-    vec3 deep  = vec3(0.05, 0.12, 0.35);
-    vec3 low   = vec3(0.13, 0.43, 0.18);
-    vec3 mid   = vec3(0.62, 0.52, 0.30);
-    vec3 high  = vec3(0.95, 0.95, 0.95);
-    if (t < 0.33) return mix(deep, low,  t / 0.33);
-    if (t < 0.66) return mix(low,  mid, (t - 0.33) / 0.33);
-    return           mix(mid,  high, (t - 0.66) / 0.34);
-  }
+  varying float vSlope;
+  varying vec2  vUv;
 
   void main() {
-    vec3 baseCol = heightRamp(vNormHeight);
-    // Ambient 0.35 + diffuse 0.65 — no scene lights needed
+    // Sample palette texture: u = height [0,1], v = (row+0.5)/3.0
+    float palV = (uPaletteRow + 0.5) / 3.0;
+    vec3 baseCol = texture2D(uPalette, vec2(vNormHeight, palV)).rgb;
+
     float shade = 0.35 + 0.65 * vDiffuse;
-    gl_FragColor = vec4(baseCol * shade, 1.0);
+
+    if (uOverlay == 1) {
+      // Slope overlay: 0–45° mapped to green→yellow→red
+      float s = clamp(vSlope / 45.0, 0.0, 1.0);
+      vec3 slopeCol;
+      if (s < 0.5) {
+        slopeCol = mix(vec3(0.1, 0.7, 0.2), vec3(0.9, 0.8, 0.1), s * 2.0);
+      } else {
+        slopeCol = mix(vec3(0.9, 0.8, 0.1), vec3(0.9, 0.1, 0.1), (s - 0.5) * 2.0);
+      }
+      gl_FragColor = vec4(slopeCol * shade, 1.0);
+    } else if (uOverlay == 2) {
+      // Hillshade only — greyscale
+      gl_FragColor = vec4(vec3(shade), 1.0);
+    } else {
+      gl_FragColor = vec4(baseCol * shade, 1.0);
+    }
   }
 `;
 
-// ─── Terrain mesh ───────────────────────────────────────────────────────────
-const GRID = 512;
-const PLANE_SIZE = 900;
-
-// Placeholder: 2×2 RGBA Uint8 texture (all zeros = height 0)
+// ─── Terrain ────────────────────────────────────────────────────────────────
 const placeholderData = new Uint8Array(2 * 2 * 4);
-const heightTexture = new THREE.DataTexture(
-  placeholderData, 2, 2,
-  THREE.RGBAFormat, THREE.UnsignedByteType
-);
+const heightTexture = new THREE.DataTexture(placeholderData, 2, 2, THREE.RGBAFormat, THREE.UnsignedByteType);
 heightTexture.minFilter = THREE.NearestFilter;
 heightTexture.magFilter = THREE.NearestFilter;
 heightTexture.needsUpdate = true;
+
+const paletteTexture = buildPaletteTexture();
 
 const uniforms = {
   uHeightMap:    { value: heightTexture },
@@ -175,16 +374,15 @@ const uniforms = {
   uMinHeight:    { value: 0.0 },
   uMaxHeight:    { value: 1.0 },
   uTexelSize:    { value: 0.5 },
+  uPalette:      { value: paletteTexture },
+  uPaletteRow:   { value: 0.0 },
+  uOverlay:      { value: 0 },
 };
 
 const geometry = new THREE.PlaneGeometry(PLANE_SIZE, PLANE_SIZE, GRID, GRID);
 geometry.rotateX(-Math.PI / 2);
 
-const material = new THREE.ShaderMaterial({
-  vertexShader, fragmentShader, uniforms,
-  side: THREE.DoubleSide,
-});
-
+const material = new THREE.ShaderMaterial({ vertexShader, fragmentShader, uniforms, side: THREE.DoubleSide });
 const mesh = new THREE.Mesh(geometry, material);
 scene.add(mesh);
 
@@ -192,7 +390,27 @@ const grid = new THREE.GridHelper(PLANE_SIZE, 20, 0x223344, 0x223344);
 grid.position.y = -0.5;
 scene.add(grid);
 
-// ─── Vertical exaggeration ──────────────────────────────────────────────────
+// Cross-section line visualisation
+const crossLineGeo = new THREE.BufferGeometry();
+crossLineGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(6), 3));
+const crossLineMat = new THREE.LineBasicMaterial({ color: 0xff6644, linewidth: 2 });
+const crossLine = new THREE.Line(crossLineGeo, crossLineMat);
+crossLine.visible = false;
+scene.add(crossLine);
+
+// ─── State ──────────────────────────────────────────────────────────────────
+let currentFloatData = null;
+let currentMeta = null;
+let cameraMode = 'orbit';
+let measureActive = false;
+let crossSectionMode = false;
+let crossSectionStart = null;
+const fpsState = { forward: 0, right: 0, up: 0, yaw: 0, pitch: 0, speed: 3.0 };
+let flythroughWaypoints = [];
+let flythroughT = 0;
+let flythroughActive = false;
+
+// ─── UI bindings ────────────────────────────────────────────────────────────
 const veSlider = document.getElementById('ve-slider');
 const veValue  = document.getElementById('ve-value');
 veSlider.addEventListener('input', () => {
@@ -201,7 +419,318 @@ veSlider.addEventListener('input', () => {
   veValue.textContent = v.toFixed(1) + '×';
 });
 
-// ─── Upload + parse ─────────────────────────────────────────────────────────
+document.getElementById('palette-select').addEventListener('change', e => {
+  uniforms.uPaletteRow.value = parseFloat(e.target.value);
+});
+
+document.getElementById('overlay-select').addEventListener('change', e => {
+  uniforms.uOverlay.value = parseInt(e.target.value);
+});
+
+// ─── Camera modes ───────────────────────────────────────────────────────────
+const camHint = document.getElementById('cam-hint');
+const crosshair = document.getElementById('crosshair');
+
+function resetCamera() {
+  camera.position.set(...DEFAULT_CAM.pos);
+  camera.lookAt(new THREE.Vector3(...DEFAULT_CAM.target));
+  orbitControls.target.set(...DEFAULT_CAM.target);
+  orbitControls.update();
+}
+
+function setCameraMode(mode) {
+  cameraMode = mode;
+  orbitControls.enabled = (mode === 'orbit');
+  crosshair.style.display = (mode === 'fps') ? 'block' : 'none';
+  flythroughActive = false;
+
+  if (mode === 'orbit') {
+    document.exitPointerLock && document.exitPointerLock();
+    camHint.style.display = 'none';
+  } else if (mode === 'fps') {
+    renderer.domElement.requestPointerLock();
+    camHint.textContent = 'WASD + mouse · Q/E up/down · ESC exit';
+    camHint.style.display = 'block';
+    setTimeout(() => { camHint.style.display = 'none'; }, 4000);
+  } else if (mode === 'aerial') {
+    camera.position.set(0, 800, 0);
+    camera.lookAt(0, 0, 0);
+    camHint.textContent = 'Aerial — scroll to zoom';
+    camHint.style.display = 'block';
+    setTimeout(() => { camHint.style.display = 'none'; }, 3000);
+  } else if (mode === 'flythrough') {
+    startFlythrough();
+  }
+}
+
+document.getElementById('camera-select').addEventListener('change', e => setCameraMode(e.target.value));
+document.getElementById('btn-reset-cam').addEventListener('click', () => {
+  document.getElementById('camera-select').value = 'orbit';
+  setCameraMode('orbit');
+  resetCamera();
+});
+
+// FPS controls
+document.addEventListener('keydown', e => {
+  if (cameraMode !== 'fps') return;
+  if (e.code === 'KeyW') fpsState.forward = 1;
+  if (e.code === 'KeyS') fpsState.forward = -1;
+  if (e.code === 'KeyA') fpsState.right = -1;
+  if (e.code === 'KeyD') fpsState.right = 1;
+  if (e.code === 'KeyQ') fpsState.up = -1;
+  if (e.code === 'KeyE') fpsState.up = 1;
+  if (e.code === 'ShiftLeft') fpsState.speed = 8.0;
+});
+document.addEventListener('keyup', e => {
+  if (cameraMode !== 'fps') return;
+  if (e.code === 'KeyW' || e.code === 'KeyS') fpsState.forward = 0;
+  if (e.code === 'KeyA' || e.code === 'KeyD') fpsState.right = 0;
+  if (e.code === 'KeyQ' || e.code === 'KeyE') fpsState.up = 0;
+  if (e.code === 'ShiftLeft') fpsState.speed = 3.0;
+});
+document.addEventListener('mousemove', e => {
+  if (cameraMode !== 'fps' || !document.pointerLockElement) return;
+  const sensitivity = 0.002;
+  fpsState.yaw -= e.movementX * sensitivity;
+  fpsState.pitch -= e.movementY * sensitivity;
+  fpsState.pitch = Math.max(-Math.PI/2 + 0.01, Math.min(Math.PI/2 - 0.01, fpsState.pitch));
+});
+document.addEventListener('pointerlockchange', () => {
+  if (!document.pointerLockElement && cameraMode === 'fps') {
+    document.getElementById('camera-select').value = 'orbit';
+    setCameraMode('orbit');
+  }
+});
+
+function updateFPS() {
+  const dir = new THREE.Vector3();
+  dir.x = Math.sin(fpsState.yaw) * Math.cos(fpsState.pitch);
+  dir.y = Math.sin(fpsState.pitch);
+  dir.z = Math.cos(fpsState.yaw) * Math.cos(fpsState.pitch);
+  const right = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0,1,0)).normalize();
+  const move = new THREE.Vector3();
+  move.addScaledVector(dir, fpsState.forward * fpsState.speed);
+  move.addScaledVector(right, fpsState.right * fpsState.speed);
+  move.y += fpsState.up * fpsState.speed;
+  camera.position.add(move);
+  camera.lookAt(camera.position.clone().add(dir));
+}
+
+// Aerial scroll zoom
+renderer.domElement.addEventListener('wheel', e => {
+  if (cameraMode === 'aerial') {
+    camera.position.y = Math.max(50, Math.min(2000, camera.position.y + e.deltaY * 0.5));
+    camera.lookAt(camera.position.x, 0, camera.position.z);
+    e.preventDefault();
+  }
+}, { passive: false });
+
+// ─── Waypoint flythrough ────────────────────────────────────────────────────
+function startFlythrough() {
+  flythroughWaypoints = [
+    { pos: [-400, 300, 400], target: [0, 0, 0] },
+    { pos: [0, 200, 400],    target: [0, 0, 0] },
+    { pos: [400, 300, 200],  target: [0, 0, 0] },
+    { pos: [400, 400, -200], target: [0, 0, 0] },
+    { pos: [0, 500, -400],   target: [0, 0, 0] },
+    { pos: [-400, 300, -200],target: [0, 0, 0] },
+    { pos: [-400, 300, 400], target: [0, 0, 0] },
+  ];
+  flythroughT = 0;
+  flythroughActive = true;
+  camHint.textContent = 'Flythrough — click to stop';
+  camHint.style.display = 'block';
+}
+
+function updateFlythrough() {
+  if (!flythroughActive || flythroughWaypoints.length < 2) return;
+  flythroughT += 0.001;
+  if (flythroughT >= 1.0) flythroughT = 0;
+
+  const n = flythroughWaypoints.length;
+  const segment = flythroughT * (n - 1);
+  const i = Math.floor(segment);
+  const frac = segment - i;
+  const a = flythroughWaypoints[i];
+  const b = flythroughWaypoints[Math.min(i + 1, n - 1)];
+
+  camera.position.lerpVectors(
+    new THREE.Vector3(...a.pos),
+    new THREE.Vector3(...b.pos),
+    frac
+  );
+  const lookTarget = new THREE.Vector3().lerpVectors(
+    new THREE.Vector3(...a.target),
+    new THREE.Vector3(...b.target),
+    frac
+  );
+  camera.lookAt(lookTarget);
+}
+
+renderer.domElement.addEventListener('click', () => {
+  if (flythroughActive) {
+    flythroughActive = false;
+    camHint.style.display = 'none';
+    document.getElementById('camera-select').value = 'orbit';
+    setCameraMode('orbit');
+  }
+});
+
+// ─── Measure mode ───────────────────────────────────────────────────────────
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+const infoPanel = document.getElementById('info-panel');
+
+document.getElementById('btn-measure').addEventListener('click', () => {
+  measureActive = !measureActive;
+  const btn = document.getElementById('btn-measure');
+  btn.style.background = measureActive ? '#5a3a1f' : '#1e3a5f';
+  btn.textContent = measureActive ? 'Measuring…' : 'Measure';
+  infoPanel.style.display = measureActive ? 'block' : 'none';
+  if (crossSectionMode) toggleCrossSection();
+});
+
+renderer.domElement.addEventListener('mousemove', e => {
+  if (!measureActive || !currentFloatData || !currentMeta) return;
+  mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObject(mesh);
+  if (hits.length === 0) return;
+
+  const uv = hits[0].uv;
+  if (!uv) return;
+  const w = currentMeta.width, h = currentMeta.height;
+  const px = Math.floor(uv.x * w), py = Math.floor((1 - uv.y) * h);
+  const idx = py * w + px;
+  if (idx >= 0 && idx < currentFloatData.length) {
+    const val = currentFloatData[idx];
+    document.getElementById('measure-val').textContent = val.toFixed(1);
+    document.getElementById('measure-unit').textContent = currentMeta.units === 'metres' ? 'm' : 'rel';
+    document.getElementById('measure-coords').textContent = `px (${px}, ${py})`;
+  }
+});
+
+// ─── Cross-section ──────────────────────────────────────────────────────────
+function toggleCrossSection() {
+  crossSectionMode = !crossSectionMode;
+  const btn = document.getElementById('btn-cross-section');
+  btn.style.background = crossSectionMode ? '#5a3a1f' : '#1e3a5f';
+  btn.textContent = crossSectionMode ? 'Click 2 points…' : 'Cross-Section';
+  crossSectionStart = null;
+  crossLine.visible = false;
+  document.getElementById('profile-panel').style.display = 'none';
+  if (measureActive) { measureActive = false; document.getElementById('btn-measure').click(); }
+}
+
+document.getElementById('btn-cross-section').addEventListener('click', toggleCrossSection);
+
+renderer.domElement.addEventListener('click', e => {
+  if (!crossSectionMode || !currentFloatData || !currentMeta) return;
+  mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObject(mesh);
+  if (hits.length === 0) return;
+
+  const uv = hits[0].uv;
+  if (!uv) return;
+  const pt = { x: uv.x, y: uv.y, world: hits[0].point.clone() };
+
+  if (!crossSectionStart) {
+    crossSectionStart = pt;
+    document.getElementById('btn-cross-section').textContent = 'Click end point…';
+  } else {
+    drawCrossSection(crossSectionStart, pt);
+    crossSectionMode = false;
+    const btn = document.getElementById('btn-cross-section');
+    btn.style.background = '#1e3a5f';
+    btn.textContent = 'Cross-Section';
+  }
+});
+
+function drawCrossSection(a, b) {
+  if (!currentFloatData || !currentMeta) return;
+  const w = currentMeta.width, h = currentMeta.height;
+  const numSamples = 200;
+  const heights = [];
+  for (let i = 0; i <= numSamples; i++) {
+    const t = i / numSamples;
+    const ux = a.x + (b.x - a.x) * t;
+    const uy = a.y + (b.y - a.y) * t;
+    const px = Math.floor(ux * w), py = Math.floor((1 - uy) * h);
+    const idx = py * w + px;
+    heights.push(idx >= 0 && idx < currentFloatData.length ? currentFloatData[idx] : 0);
+  }
+
+  // Draw line on terrain
+  const posArr = crossLine.geometry.attributes.position;
+  const range = currentMeta.max_height - currentMeta.min_height || 1;
+  const exag = uniforms.uExaggeration.value;
+  posArr.setXYZ(0, a.world.x, a.world.y, a.world.z);
+  posArr.setXYZ(1, b.world.x, b.world.y, b.world.z);
+  posArr.needsUpdate = true;
+  crossLine.visible = true;
+
+  // Draw 2D profile
+  const canvas = document.getElementById('profile-canvas');
+  const ctx = canvas.getContext('2d');
+  const cw = canvas.width, ch = canvas.height;
+  ctx.clearRect(0, 0, cw, ch);
+
+  const hMin = Math.min(...heights), hMax = Math.max(...heights);
+  const hRange = hMax - hMin || 1;
+
+  // Background
+  ctx.fillStyle = '#0e0e1a';
+  ctx.fillRect(0, 0, cw, ch);
+
+  // Grid lines
+  ctx.strokeStyle = '#1a2a3a';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = 20 + (ch - 40) * (1 - i / 4);
+    ctx.beginPath(); ctx.moveTo(40, y); ctx.lineTo(cw - 10, y); ctx.stroke();
+  }
+
+  // Profile line
+  ctx.strokeStyle = '#7ec8e3';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i <= numSamples; i++) {
+    const x = 40 + (cw - 50) * (i / numSamples);
+    const y = 20 + (ch - 40) * (1 - (heights[i] - hMin) / hRange);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Fill under curve
+  ctx.lineTo(40 + (cw - 50), ch - 20);
+  ctx.lineTo(40, ch - 20);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(126, 200, 227, 0.12)';
+  ctx.fill();
+
+  // Labels
+  ctx.fillStyle = '#999';
+  ctx.font = '11px Arial';
+  ctx.textAlign = 'right';
+  for (let i = 0; i <= 4; i++) {
+    const y = 20 + (ch - 40) * (1 - i / 4);
+    const val = hMin + hRange * (i / 4);
+    ctx.fillText(val.toFixed(1), 36, y + 4);
+  }
+
+  // Title
+  ctx.fillStyle = '#7ec8e3';
+  ctx.font = 'bold 12px Arial';
+  ctx.textAlign = 'left';
+  ctx.fillText('Cross-Section Profile', 42, 14);
+
+  document.getElementById('profile-panel').style.display = 'block';
+}
+
+// ─── Upload ─────────────────────────────────────────────────────────────────
 document.getElementById('file-input').addEventListener('change', async () => {
   const file = document.getElementById('file-input').files[0];
   if (!file) return;
@@ -223,23 +752,18 @@ document.getElementById('file-input').addEventListener('change', async () => {
 
     const buf = await resp.arrayBuffer();
     const view = new DataView(buf);
-    const metaLen = view.getUint32(0, true);  // 4-byte LE prefix
+    const metaLen = view.getUint32(0, true);
 
-    // Decode metadata JSON
     const metaBytes = new Uint8Array(buf, 4, metaLen);
     const meta = JSON.parse(new TextDecoder().decode(metaBytes));
     const { width, height, min_height, max_height } = meta;
 
-    // Copy raw bytes into an aligned buffer — offset (4+metaLen) may not be
-    // 4-byte aligned, which would throw a RangeError on Float32Array construction.
     const rawByteOffset = 4 + metaLen;
     const rawByteLength = width * height * 4;
     const aligned = new ArrayBuffer(rawByteLength);
     new Uint8Array(aligned).set(new Uint8Array(buf, rawByteOffset, rawByteLength));
     const floatData = new Float32Array(aligned);
 
-    // Diagnostic — runs unconditionally before any texture work.
-    // If min===max here the bug is backend or parsing; otherwise it's downstream.
     let mn = Infinity, mx = -Infinity, sum = 0;
     for (let i = 0; i < floatData.length; i++) {
       const v = floatData[i];
@@ -247,44 +771,33 @@ document.getElementById('file-input').addEventListener('change', async () => {
       if (v > mx) mx = v;
       sum += v;
     }
-    const mean = sum / floatData.length;
-    console.log(`[DepthWizard] float32: length=${floatData.length}, min=${mn.toFixed(2)}, max=${mx.toFixed(2)}, mean=${mean.toFixed(2)}`);
+    console.log(`[DepthWizard] float32: len=${floatData.length}, min=${mn.toFixed(2)}, max=${mx.toFixed(2)}, mean=${(sum/floatData.length).toFixed(2)}`);
     console.log(`[DepthWizard] metadata:`, meta);
-    if (mn === mx) {
-      console.warn('[DepthWizard] *** min===max — data is flat; bug is backend or parsing ***');
-    } else {
-      console.log('[DepthWizard] data has height variation — proceeding to pack texture');
-    }
+    if (mn === mx) console.warn('[DepthWizard] *** flat data — bug is backend or parsing ***');
 
-    // Surface backend fallback warning in UI
     const warningEl = document.getElementById('warning');
     if (meta.warning) {
       warningEl.textContent = '⚠ ' + meta.warning;
       warningEl.style.display = 'block';
-      console.warn('[DepthWizard] backend warning:', meta.warning);
     } else {
       warningEl.style.display = 'none';
     }
 
-    // Pack normalised height into RG channels of a Uint8 RGBA texture.
-    // val ∈ [0, 65535]; R = high byte, G = low byte, B/A unused (0).
-    // Round-trip: h = (R*256 + G) / 65535 ≈ h_norm to within 1/65535.
+    // Store for measurement / cross-section
+    currentFloatData = floatData;
+    currentMeta = meta;
+
+    // RG pack
     const range = max_height - min_height || 1.0;
     const rgba = new Uint8Array(width * height * 4);
     for (let i = 0; i < width * height; i++) {
       const norm = (floatData[i] - min_height) / range;
       const val  = Math.round(Math.min(Math.max(norm, 0.0), 1.0) * 65535);
-      rgba[i * 4 + 0] = (val >> 8) & 0xFF;   // R — high byte
-      rgba[i * 4 + 1] =  val       & 0xFF;   // G — low byte
+      rgba[i * 4 + 0] = (val >> 8) & 0xFF;
+      rgba[i * 4 + 1] =  val       & 0xFF;
       rgba[i * 4 + 2] = 0;
       rgba[i * 4 + 3] = 255;
     }
-
-    // Spot-check round-trip on one pixel (centre)
-    const ci = Math.floor(height / 2) * width + Math.floor(width / 2);
-    const ciR = rgba[ci * 4], ciG = rgba[ci * 4 + 1];
-    const unpacked = (ciR * 256 + ciG) / 65535 * range + min_height;
-    console.log(`[DepthWizard] round-trip check centre px: original=${floatData[ci].toFixed(2)}, repacked=${unpacked.toFixed(2)}`);
 
     const tex = new THREE.DataTexture(rgba, width, height, THREE.RGBAFormat, THREE.UnsignedByteType);
     tex.minFilter = THREE.NearestFilter;
@@ -300,11 +813,11 @@ document.getElementById('file-input').addEventListener('change', async () => {
 
   } catch (e) {
     console.error('[DepthWizard] upload error:', e);
-    document.getElementById('status').textContent = 'Error: ' + e.message;
+    status.textContent = 'Error: ' + e.message;
   }
 });
 
-// ─── Resize / render loop ───────────────────────────────────────────────────
+// ─── Resize + render loop ───────────────────────────────────────────────────
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
@@ -313,7 +826,9 @@ window.addEventListener('resize', () => {
 
 (function animate() {
   requestAnimationFrame(animate);
-  controls.update();
+  if (cameraMode === 'fps') updateFPS();
+  else if (cameraMode === 'flythrough') updateFlythrough();
+  else orbitControls.update();
   renderer.render(scene, camera);
 })();
 </script>

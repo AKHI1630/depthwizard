@@ -35,34 +35,34 @@ class ModelStatus(str, Enum):
 
 
 _synthetic = SyntheticEstimator()
-_depth_anything: HeightEstimator | None = None
+_midas: HeightEstimator | None = None
 _model_status: ModelStatus = ModelStatus.LOADING
 _model_error: str = ""
 
 
-def _load_depth_anything() -> None:
-    global _depth_anything, _model_status, _model_error
+def _load_midas() -> None:
+    global _midas, _model_status, _model_error
     try:
-        from .estimators.depth_anything import DepthAnythingEstimator
-        _depth_anything = DepthAnythingEstimator()
+        from .estimators.midas import MidasEstimator
+        _midas = MidasEstimator()
         _model_status = ModelStatus.READY
         logger.info("=" * 60)
-        logger.info("DepthWizard ready — Depth-Anything-V2-Small loaded, accepting requests.")
+        logger.info("DepthWizard ready — MiDaS_small loaded, accepting requests.")
         logger.info("=" * 60)
     except Exception as exc:
         _model_status = ModelStatus.FAILED
         _model_error = str(exc)
         logger.error("=" * 60)
-        logger.error("Depth-Anything failed to load — /upload will fall back to synthetic.")
+        logger.error("MiDaS failed to load — /upload?estimator=midas will fall back to synthetic.")
         logger.error("Reason: %s", exc)
         logger.error("=" * 60)
 
 
 @app.on_event("startup")
 async def startup() -> None:
-    t = threading.Thread(target=_load_depth_anything, name="model-loader", daemon=True)
+    t = threading.Thread(target=_load_midas, name="model-loader", daemon=True)
     t.start()
-    logger.info("Server ready. Model loading in background — watch for the 'DepthWizard ready' line.")
+    logger.info("Server ready. MiDaS loading in background — watch for the 'DepthWizard ready' line.")
 
 
 # ── Estimator selection ───────────────────────────────────────────────────────
@@ -77,8 +77,8 @@ def _pick_estimator(name: str) -> tuple[HeightEstimator, str]:
             detail="Model still loading — please try again in a moment.",
         )
     if _model_status is ModelStatus.FAILED:
-        return _synthetic, f"Depth-Anything failed to load ({_model_error}); using synthetic instead."
-    return _depth_anything, ""  # type: ignore[return-value]
+        return _synthetic, f"MiDaS failed to load ({_model_error}); using synthetic instead."
+    return _midas, ""  # type: ignore[return-value]
 
 
 # ── /health ───────────────────────────────────────────────────────────────────
@@ -95,7 +95,7 @@ async def health() -> JSONResponse:
 @app.post("/upload")
 async def upload(
     file: UploadFile = File(...),
-    estimator: Literal["depth", "synthetic"] = Query(default="depth"),
+    estimator: Literal["midas", "synthetic"] = Query(default="midas"),
 ) -> Response:
     est, warning = _pick_estimator(estimator)
     image_bytes = await file.read()
