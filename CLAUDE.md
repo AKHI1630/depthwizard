@@ -28,7 +28,7 @@ Poll `GET /health` to check model status programmatically.
 
 ## API Endpoints
 - `GET /health` — model status
-- `POST /upload?estimator=midas|synthetic` — upload image, returns binary heightmap
+- `POST /upload?estimator=midas|synthetic&detrend=true|false` — upload image, returns binary heightmap
 - `POST /calibrate` — upload reference GeoTIFF to RANSAC-calibrate last prediction
 - `POST /validate` — upload reference GeoTIFF to compute error stats vs last prediction
 
@@ -55,7 +55,10 @@ Poll `GET /health` to check model status programmatically.
 - Synthetic fallback always available. Estimator dropdown in UI.
 
 ## Estimator notes
-- MiDaS_small: 81.8 MB checkpoint from GitHub releases. Resizes internally to 256×256. Output interpolated to 1024×1024. Uncalibrated 0–150m range.
+- MiDaS_small: 81.8 MB checkpoint from GitHub releases. Native input 256×256.
+- **Tiling**: images >256px are split into overlapping 256×256 tiles, inferred individually, and merged with cosine-feathered blending. This preserves building detail that was previously destroyed by 4× downsampling.
+- **Detrending**: MiDaS has a ground-level photo prior that produces bogus low-frequency ramps on nadir imagery. High-pass filter (large-sigma Gaussian subtraction) removes the artefact and keeps only building/structure relief. Controlled by `?detrend=true|false` and UI checkbox.
+- Output interpolated to 1024×1024. Uncalibrated 0–150m range.
 - Depth-Anything-V2-Small: NOT working (HF CDN blocked). Code exists but not wired in.
 - Synthetic: deterministic Gaussian hills + box buildings, 1024×1024.
 

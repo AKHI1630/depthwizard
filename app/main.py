@@ -121,6 +121,7 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 async def upload(
     file: UploadFile = File(...),
     estimator: Literal["midas", "synthetic"] = Query(default="midas"),
+    detrend: bool = Query(default=True),
 ) -> Response:
     image_bytes = await file.read()
 
@@ -143,7 +144,10 @@ async def upload(
     est, warning = _pick_estimator(estimator)
 
     try:
-        height_array, meta = est.estimate(image_bytes)
+        kwargs = {}
+        if hasattr(est, 'estimate') and 'detrend' in est.estimate.__code__.co_varnames:
+            kwargs['detrend'] = detrend
+        height_array, meta = est.estimate(image_bytes, **kwargs)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:

@@ -129,6 +129,10 @@
       <option value="synthetic">Synthetic (debug)</option>
     </select>
   </div>
+  <div class="row" style="display:flex;align-items:center;gap:8px;">
+    <input type="checkbox" id="detrend-check" checked style="accent-color:#7ec8e3;width:16px;height:16px;">
+    <label for="detrend-check" style="margin:0;cursor:pointer;">Remove low-freq ramp (detrend)</label>
+  </div>
   <div class="row">
     <label for="file-btn">Upload Image</label>
     <div id="file-btn" onclick="document.getElementById('file-input').click()">Choose file…</div>
@@ -217,7 +221,7 @@
 <script>
 // ─── Constants ──────────────────────────────────────────────────────────────
 const GRID = 512, PLANE_SIZE = 900;
-const DEFAULT_CAM = { pos: [0, 400, 700], target: [0, 0, 0] };
+const DEFAULT_CAM = { pos: [350, 500, 350], target: [0, 50, 0] };
 
 // ─── Viridis & Cividis LUTs (64 stops, sampled from matplotlib) ─────────
 const VIRIDIS = [
@@ -794,11 +798,12 @@ document.getElementById('file-input').addEventListener('change', async () => {
   status.textContent = 'Uploading…';
 
   const estimator = document.getElementById('estimator-select').value;
+  const detrend = document.getElementById('detrend-check').checked;
   const formData = new FormData();
   formData.append('file', file);
 
   try {
-    const resp = await fetch(`/upload?estimator=${estimator}`, { method: 'POST', body: formData });
+    const resp = await fetch(`/upload?estimator=${estimator}&detrend=${detrend}`, { method: 'POST', body: formData });
     if (resp.status === 503) {
       const err = await resp.json().catch(() => ({}));
       status.textContent = err.detail || 'Model still loading — try again in a moment.';
