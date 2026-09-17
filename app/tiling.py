@@ -1,7 +1,7 @@
 """
 Tiling support for running a fixed-resolution estimator on large images.
-Splits image into overlapping tiles, runs inference per tile, blends with
-cosine-feathered weights so seams are invisible.
+Splits image into overlapping tiles, runs inference per tile (or in batch),
+blends with cosine-feathered weights so seams are invisible.
 """
 import logging
 from typing import Callable
@@ -17,6 +17,7 @@ def tile_and_merge(
     estimate_fn: Callable[[Image.Image], np.ndarray],
     tile_size: int = 256,
     overlap: int = 64,
+    batch_fn: Callable[[list[Image.Image]], list[np.ndarray]] | None = None,
 ) -> np.ndarray:
     w, h = image.size
 
@@ -32,31 +33,42 @@ def tile_and_merge(
         w, h, nx, ny, tile_size, tile_size, overlap, step,
     )
 
-    result = np.zeros((h, w), dtype=np.float64)
-    weight = np.zeros((h, w), dtype=np.float64)
-
-    blend = _cosine_blend_mask(tile_size, overlap)
-
+    # Collect tile crops and their positions
+    tiles = []
+    positions = []
     for iy in range(ny):
         for ix in range(nx):
             x0 = min(ix * step, max(0, w - tile_size))
             y0 = min(iy * step, max(0, h - tile_size))
             x1 = min(x0 + tile_size, w)
             y1 = min(y0 + tile_size, h)
-
             crop = image.crop((x0, y0, x1, y1))
-            tile_h = estimate_fn(crop)
+            tiles.append(crop)
+            positions.append((x0, y0, x1, y1))
 
-            tw, th = x1 - x0, y1 - y0
-            if tile_h.shape[0] != th or tile_h.shape[1] != tw:
-                tile_h = np.array(
-                    Image.fromarray(tile_h).resize((tw, th), Image.BILINEAR),
-                    dtype=np.float32,
-                )
+    # Run inference: batch if available, otherwise sequential
+    if batch_fn is not None and len(tiles) > 1:
+        logger.info("Batch inference: %d tiles", len(tiles))
+        tile_results = batch_fn(tiles)
+    else:
+        tile_results = [estimate_fn(t) for t in tiles]
 
-            b = blend[:th, :tw]
-            result[y0:y1, x0:x1] += tile_h * b
-            weight[y0:y1, x0:x1] += b
+    # Blend results
+    result = np.zeros((h, w), dtype=np.float64)
+    weight = np.zeros((h, w), dtype=np.float64)
+    blend = _cosine_blend_mask(tile_size, overlap)
+
+    for tile_h, (x0, y0, x1, y1) in zip(tile_results, positions):
+        tw, th = x1 - x0, y1 - y0
+        if tile_h.shape[0] != th or tile_h.shape[1] != tw:
+            tile_h = np.array(
+                Image.fromarray(tile_h).resize((tw, th), Image.BILINEAR),
+                dtype=np.float32,
+            )
+
+        b = blend[:th, :tw]
+        result[y0:y1, x0:x1] += tile_h * b
+        weight[y0:y1, x0:x1] += b
 
     weight[weight == 0] = 1.0
     merged = (result / weight).astype(np.float32)

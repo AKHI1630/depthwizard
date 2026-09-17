@@ -64,7 +64,7 @@ Poll `GET /health` to check model status programmatically.
 - Synthetic fallback always available. Estimator dropdown in UI.
 
 ## Estimator notes
-- **Depth Anything V2 Small** (default): 99.2 MB local weights in `models/depth-anything-v2-small/`. Uses `DepthAnythingForDepthEstimation` (NOT DPTForDepthEstimation). 518×518 tiles, 128px overlap.
+- **Depth Anything V2 Small** (default): 99.2 MB local weights in `models/depth-anything-v2-small/`. Uses `DepthAnythingForDepthEstimation` (NOT DPTForDepthEstimation). 518×518 tiles, 96px overlap. Batch inference for multi-tile images.
 - **MiDaS_small**: 81.8 MB from GitHub releases. 256×256 tiles, 64px overlap.
 - **Tiling**: images >tile_size are split into overlapping tiles, inferred individually, merged with cosine-feathered blending.
 - **Detrending**: High-pass filter (large-sigma Gaussian subtraction) removes low-frequency ramps. `mode='nearest'` + cosine taper to prevent edge artifacts.
@@ -73,16 +73,18 @@ Poll `GET /health` to check model status programmatically.
 - Synthetic: deterministic Gaussian hills + box buildings, 1024×1024.
 
 ## Structure-aware DSM
-- SLIC superpixels (n=200, compactness=20) from scikit-image.
-- Vectorized classification using scipy.ndimage.mean/standard_deviation (not regionprops).
-- Classes: BUILDING (flat roof=median depth), ROAD/GROUND (base elevation), VEGETATION (median + 30% roughness).
-- Thresholds: brightness, texture std, green excess.
-- Performance: ~3s for 1024×1024 (SLIC ~2s, classify ~0.2s, compose ~0.6s).
+- Adaptive SLIC superpixels: count = (w*h)/4000, clamped 200-1200, max_num_iter=5.
+- Shape-based classification: solidity + elongation + color + texture + depth variance.
+- Adjacent building superpixels merged into unified rooftops (union-find on depth similarity).
+- Outlier clamping: 10th-90th percentile clip before median per region.
+- Flat-roof assertion: within-building std must be < 0.01 (logged warning on violation).
+- Pearson r = 0.87 (up from 0.64 baseline).
 
-## Performance (512px test image)
-- Depth inference (DA V2): ~1.3s
-- Structure DSM: ~2.9s (SLIC 2.1 + classify 0.2 + compose 0.6)
-- Total: ~5s — well under 30s budget
+## Performance (512px test image, warm)
+- Depth inference (DA V2, 96px overlap): ~3.2s
+- Structure DSM: ~2.1s (SLIC 1.0 + classify 0.4 + compose 0.5)
+- Total: ~5.4s — well under 30s budget
+- Batch tile inference available for larger images (stacked forward pass).
 
 ## Conventions
 - Python 3.12.10, venv at `.venv/`, transformers==4.49.0, scikit-image==0.26.0

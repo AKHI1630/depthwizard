@@ -1,5 +1,6 @@
 import io
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Tuple
@@ -21,12 +22,13 @@ logger = logging.getLogger(__name__)
 
 MODEL_DIR = Path(__file__).parent.parent.parent / "models" / "depth-anything-v2-small"
 TILE_SIZE = 518
-TILE_OVERLAP = 128
+TILE_OVERLAP = 96
 
 
 class DepthAnythingEstimator(HeightEstimator):
 
     def __init__(self):
+        import torch
         from transformers import AutoImageProcessor, DepthAnythingForDepthEstimation
 
         if not MODEL_DIR.exists():
@@ -50,6 +52,10 @@ class DepthAnythingEstimator(HeightEstimator):
                 f"model.safetensors is only {weights_size} bytes — "
                 "likely a Git LFS pointer. Run 'git lfs pull' in the source repo."
             )
+
+        phys_cores = os.cpu_count() or 4
+        torch.set_num_threads(phys_cores)
+        logger.info("torch.set_num_threads(%d)", phys_cores)
 
         logger.info("Loading Depth-Anything-V2-Small from %s…", MODEL_DIR)
         t0 = time.perf_counter()
@@ -83,6 +89,27 @@ class DepthAnythingEstimator(HeightEstimator):
 
         return pred.numpy().astype(np.float32)
 
+    def _infer_batch(self, tile_pils: list[Image.Image]) -> list[np.ndarray]:
+        """Run batch inference on multiple tiles in a single forward pass."""
+        import torch
+
+        inputs = self._processor(images=tile_pils, return_tensors="pt")
+        with torch.no_grad():
+            outputs = self._model(**inputs)
+            predicted_depth = outputs.predicted_depth
+
+        results = []
+        for i, tile_pil in enumerate(tile_pils):
+            pred = torch.nn.functional.interpolate(
+                predicted_depth[i:i+1].unsqueeze(1),
+                size=(tile_pil.size[1], tile_pil.size[0]),
+                mode="bicubic",
+                align_corners=False,
+            ).squeeze()
+            results.append(pred.numpy().astype(np.float32))
+
+        return results
+
     def estimate(
         self, image_bytes: bytes, detrend: bool = True
     ) -> Tuple[np.ndarray, HeightMetadata]:
@@ -112,6 +139,7 @@ class DepthAnythingEstimator(HeightEstimator):
                 self._infer_tile,
                 tile_size=TILE_SIZE,
                 overlap=TILE_OVERLAP,
+                batch_fn=self._infer_batch,
             )
 
         elapsed = time.perf_counter() - t0

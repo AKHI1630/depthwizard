@@ -29,25 +29,33 @@ CLASS_NAMES = {BUILDING: "BUILDING", ROAD: "ROAD", VEGETATION: "VEGETATION", GRO
 
 
 def _compute_shape_features(segments: np.ndarray, n_segs: int) -> tuple[np.ndarray, np.ndarray]:
-    """Compute solidity and elongation per superpixel using vectorized ops."""
-    solidity = np.ones(n_segs, dtype=np.float32)
-    elongation = np.zeros(n_segs, dtype=np.float32)
+    """Compute solidity and elongation per superpixel using vectorized bounding boxes."""
+    h, w = segments.shape
+    seg_flat = segments.ravel()
+    areas = np.bincount(seg_flat, minlength=n_segs)
 
-    for seg_id in range(n_segs):
-        ys, xs = np.where(segments == seg_id)
-        if len(ys) < 4:
-            continue
-        area = len(ys)
-        min_r, max_r = ys.min(), ys.max()
-        min_c, max_c = xs.min(), xs.max()
-        bbox_area = max((max_r - min_r + 1) * (max_c - min_c + 1), 1)
-        solidity[seg_id] = area / bbox_area
+    ys, xs = np.mgrid[:h, :w]
+    ys_flat = ys.ravel().astype(np.float64)
+    xs_flat = xs.ravel().astype(np.float64)
 
-        extent_r = max_r - min_r + 1
-        extent_c = max_c - min_c + 1
-        short = min(extent_r, extent_c)
-        long = max(extent_r, extent_c)
-        elongation[seg_id] = long / max(short, 1)
+    min_y = np.full(n_segs, h, dtype=np.float64)
+    max_y = np.full(n_segs, 0, dtype=np.float64)
+    min_x = np.full(n_segs, w, dtype=np.float64)
+    max_x = np.full(n_segs, 0, dtype=np.float64)
+
+    np.minimum.at(min_y, seg_flat, ys_flat)
+    np.maximum.at(max_y, seg_flat, ys_flat)
+    np.minimum.at(min_x, seg_flat, xs_flat)
+    np.maximum.at(max_x, seg_flat, xs_flat)
+
+    extent_y = max_y - min_y + 1
+    extent_x = max_x - min_x + 1
+    bbox_area = np.maximum(extent_y * extent_x, 1)
+    solidity = (areas / bbox_area).astype(np.float32)
+
+    short = np.minimum(extent_y, extent_x)
+    long = np.maximum(extent_y, extent_x)
+    elongation = (long / np.maximum(short, 1)).astype(np.float32)
 
     return solidity, elongation
 
@@ -56,11 +64,8 @@ def _classify_vectorized(
     image_rgb: np.ndarray,
     segments: np.ndarray,
     depth: np.ndarray,
-) -> tuple[np.ndarray, list[dict]]:
-    """Classify superpixels using color, texture, shape, and depth features.
-
-    Returns class array and per-region diagnostic dicts.
-    """
+) -> np.ndarray:
+    """Classify superpixels using color, texture, shape, and depth features."""
     n_segs = segments.max() + 1
     seg_ids = np.arange(n_segs)
     classes = np.full(n_segs, GROUND, dtype=np.int32)
@@ -118,23 +123,7 @@ def _classify_vectorized(
     classes[is_bldg] = BUILDING
     classes[is_road] = ROAD
 
-    diags = []
-    for i in range(n_segs):
-        diags.append({
-            "seg": i,
-            "class": CLASS_NAMES[classes[i]],
-            "area": int(seg_areas[i]),
-            "solidity": round(float(solidity[i]), 3),
-            "elongation": round(float(elongation[i]), 2),
-            "brightness": round(float(mean_brightness[i]), 1),
-            "texture_std": round(float(texture_std[i]), 1),
-            "green_excess": round(float(green_excess[i]), 3),
-            "depth_mean": round(float(mean_depth[i]), 2),
-            "depth_std": round(float(depth_std[i]), 2),
-            "height": 0.0,
-        })
-
-    return classes, diags
+    return classes
 
 
 def _merge_adjacent_buildings(
@@ -220,7 +209,8 @@ def structure_aware_dsm(
     segments = slic(
         image_rgb / 255.0,
         n_segments=n_segments,
-        compactness=15,
+        compactness=20,
+        max_num_iter=5,
         start_label=0,
         channel_axis=2,
     )
@@ -229,14 +219,13 @@ def structure_aware_dsm(
     logger.info("SLIC: %d superpixels in %.2f s", actual_segs, t_slic_done - t_slic)
 
     t_cls = time.perf_counter()
-    classes, diags = _classify_vectorized(image_rgb, segments, depth)
+    classes = _classify_vectorized(image_rgb, segments, depth)
 
     old_bldg_count = int((classes == BUILDING).sum())
 
     merged_labels = _merge_adjacent_buildings(segments, classes, depth, actual_segs)
     t_cls_done = time.perf_counter()
 
-    veg_from_bldg = int((classes == VEGETATION).sum()) - 0
     logger.info(
         "Classification: %.2f s — %d building, %d road, %d veg, %d ground",
         t_cls_done - t_cls,
@@ -324,21 +313,6 @@ def structure_aware_dsm(
             )
     if bad_regions == 0:
         logger.info("Flat-roof check: all %d building regions have std < 0.01", int((classes == BUILDING).sum()))
-
-    # Log per-region diagnostics (first 15)
-    for d in diags[:15]:
-        seg_id = d["seg"]
-        if classes[seg_id] == BUILDING:
-            d["height"] = rooftop_heights.get(merged_labels[seg_id], 0.0)
-        elif classes[seg_id] in (ROAD, GROUND):
-            d["height"] = base_height
-        logger.info(
-            "  seg=%d class=%-10s area=%5d sol=%.2f elong=%.1f bright=%.0f tex=%.1f "
-            "green=%.3f depth_m=%.1f depth_std=%.1f → h=%.1f",
-            d["seg"], d["class"], d["area"], d["solidity"], d["elongation"],
-            d["brightness"], d["texture_std"], d["green_excess"],
-            d["depth_mean"], d["depth_std"], d["height"],
-        )
 
     stats = {}
     for cls in (BUILDING, ROAD, VEGETATION, GROUND):

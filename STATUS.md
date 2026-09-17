@@ -30,16 +30,45 @@
 - Timing displayed in UI status bar
 - Total pipeline: ~5s for 512px image (well under 30s budget)
 
-## Performance (512×512 test image, DA V2 + structure)
-| Stage | Time |
-|-------|------|
-| Depth inference (DA V2) | 1.33s |
-| Post-processing (orient + detrend + finalize) | 0.69s |
-| Structure DSM total | 2.95s |
-|  — SLIC superpixels | 2.11s |
-|  — Classification (vectorized) | 0.21s |
-|  — Composition | 0.58s |
-| **Pipeline total** | **4.98s** |
+## P1-P4 Accuracy + Speed Fixes ✅
+
+### P1 — Fix Spiky Rooftops + Height Consistency ✅
+- **Commit**: `924c558`
+- Diagnosis: within-building std was <0.00002 — flat assignment works. Spikes from adjacent
+  superpixels of same building getting different medians (too few superpixels).
+- Adaptive superpixel count: (w*h)/4000, clamped 200-1200
+- Shape-based classification: solidity + elongation + depth variance (not brightness alone)
+- Outlier clamping: 10th-90th percentile clip before taking median
+- Adjacent building superpixels merged into unified rooftops (union-find + depth similarity)
+- Pearson r improved: 0.64 → 0.87
+
+### P2 — Sharp Walls + Road Classification ✅
+- NearestFilter confirmed on height texture (lines 886-887 of index.html)
+- No smoothing or blending applied to composed structure-aware heightmap
+- Roads classified by elongation + low texture, not brightness alone
+- Buildings require high solidity (>0.55) + low elongation (<4) + compact shape
+
+### P3 — Flat-Roof Assertion ✅
+- After composing, asserts every building region has within-std < 0.01
+- Logs loud warning on violation; all 29 regions pass
+
+### P4 — Speed ✅
+- Vectorized shape features (np.minimum.at/np.maximum.at instead of per-segment np.where)
+- SLIC max_num_iter=5 (3.4s → 1.0s, no visible quality loss)
+- Batch tile inference (stacked forward pass for multi-tile images)
+- torch.set_num_threads(cpu_count)
+- Tile overlap reduced: 128 → 96px
+- Diagnostic dict loop removed (was building 200+ dicts per request)
+
+## Performance (512×512 test image, DA V2 + structure, warm)
+| Stage | Before | After P4 | Speedup |
+|-------|--------|----------|---------|
+| SLIC superpixels | 3.37s | 1.01s | 3.3× |
+| Classification | 0.70s | 0.39s | 1.8× |
+| Composition | 0.94s | 0.53s | 1.8× |
+| **Structure total** | **5.32s** | **2.14s** | **2.5×** |
+| Depth inference (DA V2) | 3.07s | 3.22s | — |
+| **Pipeline total** | **8.43s** | **5.40s** | **1.6×** |
 
 ## Prior Tasks
 
