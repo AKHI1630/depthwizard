@@ -275,6 +275,10 @@ def segment_and_classify(image: Image.Image) -> list[InstanceMask]:
 
         label, confidence = classify_mask(feats)
 
+        reg_poly = None
+        if label == "building" and feats["contour"] is not None:
+            reg_poly = regularise_polygon(feats["contour"])
+
         instance = InstanceMask(
             mask=mask_bool,
             area=feats["area"],
@@ -288,6 +292,7 @@ def segment_and_classify(image: Image.Image) -> list[InstanceMask]:
             texture_var=feats["texture_var"],
             mean_rgb=feats["mean_rgb"],
             contour=feats["contour"],
+            regularised_polygon=reg_poly,
         )
         instances.append(instance)
 
@@ -323,6 +328,68 @@ def render_segmentation_overlay(
         overlay[inst.mask] = color
 
     return overlay
+
+
+def regularise_polygon(contour: np.ndarray, epsilon_frac: float = 0.02) -> np.ndarray:
+    """
+    Douglas-Peucker simplification + edge snapping to dominant orientations.
+
+    For rectilinear buildings: finds the two dominant edge angles,
+    then snaps each simplified vertex to the nearest dominant direction.
+    """
+    perimeter = cv2.arcLength(contour, True)
+    epsilon = epsilon_frac * perimeter
+    simplified = cv2.approxPolyDP(contour, epsilon, True)
+
+    if len(simplified) < 4:
+        return simplified
+
+    pts = simplified.reshape(-1, 2).astype(np.float64)
+    n = len(pts)
+
+    # Compute edge angles (mod 180° since direction doesn't matter)
+    edges = np.diff(np.vstack([pts, pts[:1]]), axis=0)
+    angles = np.arctan2(edges[:, 1], edges[:, 0]) % np.pi
+    lengths = np.linalg.norm(edges, axis=1)
+
+    # Find dominant orientation via length-weighted histogram
+    n_bins = 36
+    hist = np.zeros(n_bins)
+    for a, l in zip(angles, lengths):
+        bin_idx = int(a / np.pi * n_bins) % n_bins
+        hist[bin_idx] += l
+
+    # Two dominant angles (typically 90° apart for rectilinear buildings)
+    peak1 = np.argmax(hist)
+    # Suppress neighbourhood of first peak
+    suppressed = hist.copy()
+    for offset in range(-3, 4):
+        suppressed[(peak1 + offset) % n_bins] = 0
+    peak2 = np.argmax(suppressed)
+
+    dom_angles = [peak1 * np.pi / n_bins, peak2 * np.pi / n_bins]
+
+    # Snap each edge to the nearest dominant angle
+    snapped = pts.copy()
+    for i in range(n):
+        j = (i + 1) % n
+        edge = pts[j] - pts[i]
+        edge_angle = np.arctan2(edge[1], edge[0]) % np.pi
+        edge_len = np.linalg.norm(edge)
+        if edge_len < 1:
+            continue
+
+        # Find nearest dominant angle
+        diffs = [min(abs(edge_angle - da), np.pi - abs(edge_angle - da)) for da in dom_angles]
+        nearest = dom_angles[np.argmin(diffs)]
+
+        # Only snap if within 15° of a dominant angle
+        if min(diffs) < np.radians(15):
+            direction = np.array([np.cos(nearest), np.sin(nearest)])
+            projected = np.dot(edge, direction)
+            snapped[j] = snapped[i] + direction * projected
+
+    return snapped.reshape(-1, 1, 2).astype(np.int32)
 
 
 def instances_to_json(instances: list[InstanceMask]) -> list[dict]:
