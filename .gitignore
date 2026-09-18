@@ -6,6 +6,8 @@ __pycache__/
 checkpoints/
 *.h5
 *.tif
+*.pth
+*.ckpt
 *.mp4
 data/
 *.pyc
