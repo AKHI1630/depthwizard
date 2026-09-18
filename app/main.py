@@ -25,6 +25,12 @@ from .calibration import (
 )
 from .estimators.base import HeightEstimator
 from .estimators.synthetic import SyntheticEstimator
+from .sam_segmentation import (
+    get_mask_generator,
+    instances_to_json,
+    render_segmentation_overlay,
+    segment_and_classify,
+)
 from .structure_dsm import structure_aware_dsm
 from .validation import validate as run_validation
 
@@ -49,6 +55,19 @@ _midas: HeightEstimator | None = None
 _model_status: ModelStatus = ModelStatus.LOADING
 _model_error: str = ""
 _da_error: str = ""
+_sam_ready: bool = False
+_sam_error: str = ""
+
+
+def _load_sam() -> None:
+    global _sam_ready, _sam_error
+    try:
+        get_mask_generator()
+        _sam_ready = True
+        logger.info("SAM ViT-B loaded successfully.")
+    except Exception as exc:
+        _sam_error = str(exc)
+        logger.warning("SAM failed to load: %s", exc)
 
 
 def _load_models() -> None:
@@ -89,6 +108,8 @@ def _load_models() -> None:
 async def startup() -> None:
     t = threading.Thread(target=_load_models, name="model-loader", daemon=True)
     t.start()
+    t_sam = threading.Thread(target=_load_sam, name="sam-loader", daemon=True)
+    t_sam.start()
     logger.info("Server ready. Models loading in background — watch for the 'DepthWizard ready' line.")
 
 
@@ -132,11 +153,14 @@ async def health() -> JSONResponse:
         "model_status": _model_status.value,
         "depth_anything": "ready" if _depth_anything else ("failed" if _da_error else "not_loaded"),
         "midas": "ready" if _midas else "not_loaded",
+        "sam": "ready" if _sam_ready else ("failed" if _sam_error else "loading"),
     }
     if _model_error:
         body["model_error"] = _model_error
     if _da_error:
         body["da_error"] = _da_error
+    if _sam_error:
+        body["sam_error"] = _sam_error
     status_code = 200 if _model_status is ModelStatus.READY else 503
     return JSONResponse(content=body, status_code=status_code)
 
@@ -378,6 +402,83 @@ async def diagnostic_map() -> Response:
     buf = _io.BytesIO()
     img.save(buf, format="PNG")
     return Response(content=buf.getvalue(), media_type="image/png")
+
+
+# ── /segment ─────────────────────────────────────────────────────────────────
+@app.post("/segment")
+async def segment_endpoint(file: UploadFile = File(...)) -> JSONResponse:
+    """Run SAM instance segmentation + classification on uploaded image."""
+    import io as _io
+    import time as _time
+
+    from PIL import Image as PILImage
+
+    if not _sam_ready:
+        if _sam_error:
+            raise HTTPException(503, f"SAM failed to load: {_sam_error}")
+        raise HTTPException(503, "SAM still loading — please try again in a moment.")
+
+    image_bytes = await file.read()
+    if len(image_bytes) == 0:
+        raise HTTPException(400, "Empty file.")
+    if len(image_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "File too large.")
+
+    img = PILImage.open(_io.BytesIO(image_bytes)).convert("RGB")
+    _last_prediction["_source_image"] = img
+    _last_prediction["_source_bytes"] = image_bytes
+
+    t0 = _time.perf_counter()
+    instances = segment_and_classify(img)
+    t_seg = round(_time.perf_counter() - t0, 2)
+
+    _last_prediction["instances"] = instances
+
+    from collections import Counter
+    counts = dict(Counter(inst.label for inst in instances))
+    result = {
+        "count": len(instances),
+        "counts": counts,
+        "timing_s": t_seg,
+        "instances": instances_to_json(instances),
+    }
+    logger.info("Segment: %d instances in %.1f s — %s", len(instances), t_seg, counts)
+    return JSONResponse(content=result)
+
+
+@app.get("/segment-overlay")
+async def segment_overlay_endpoint() -> Response:
+    """Return SAM segmentation as a color-coded RGBA PNG."""
+    import io as _io
+
+    from PIL import Image as PILImage
+
+    instances = _last_prediction.get("instances")
+    source = _last_prediction.get("_source_image")
+    if instances is None or source is None:
+        raise HTTPException(400, "No segmentation — POST to /segment first.")
+
+    overlay = render_segmentation_overlay(source, instances)
+    img = PILImage.fromarray(overlay, "RGBA")
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+    return Response(content=buf.getvalue(), media_type="image/png")
+
+
+@app.get("/instances")
+async def instances_endpoint() -> JSONResponse:
+    """Return instance data as JSON (same as /segment response, without re-running)."""
+    instances = _last_prediction.get("instances")
+    if instances is None:
+        raise HTTPException(400, "No segmentation — POST to /segment first.")
+
+    from collections import Counter
+    counts = dict(Counter(inst.label for inst in instances))
+    return JSONResponse(content={
+        "count": len(instances),
+        "counts": counts,
+        "instances": instances_to_json(instances),
+    })
 
 
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
