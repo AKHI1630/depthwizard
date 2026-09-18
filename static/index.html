@@ -124,6 +124,26 @@
     backdrop-filter: blur(6px);
   }
   #stats-readout .sv { color: #c8d8e8; }
+  #stats-readout .warn { color: #e65100; }
+
+  /* ── Pipeline banner (top, loud) ─────────────────────────────────────── */
+  #pipeline-banner {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 999;
+    padding: 6px 16px; font-family: Consolas, Monaco, monospace; font-size: 12px;
+    text-align: center; display: none; font-weight: 600;
+  }
+  #pipeline-banner.error {
+    background: #b71c1c; color: #fff;
+  }
+  #pipeline-banner.warn {
+    background: #e65100; color: #fff;
+  }
+  #pipeline-banner.ok {
+    background: rgba(46,125,50,0.85); color: #fff;
+  }
+  #pipeline-banner.running {
+    background: rgba(21,101,192,0.85); color: #fff;
+  }
 
   /* ── Color ramp (bottom-right) ───────────────────────────────────────── */
   #color-ramp {
@@ -366,6 +386,7 @@
 </div>
 
 <!-- ── Floating elements ───────────────────────────────────────────────── -->
+<div id="pipeline-banner"></div>
 <div id="stats-readout"></div>
 <div id="color-ramp">
   <div class="ramp-label" id="ramp-max">—</div>
@@ -654,6 +675,25 @@ let lod1ImageW = 512, lod1ImageH = 512; // from API response
 let lod1DefaultCam = null; // auto-fit camera target
 let lastUploadedFile = null;
 let lastSourceBlobUrl = null;
+
+function setPipelineBanner(text, level) {
+  const el = document.getElementById('pipeline-banner');
+  el.textContent = text;
+  el.className = level;
+  el.style.display = text ? 'block' : 'none';
+  if (el._timeout) clearTimeout(el._timeout);
+  if (level === 'ok' && !text) {
+    el.style.display = 'none';
+  } else if (level === 'ok') {
+    el._timeout = setTimeout(() => { el.style.display = 'none'; }, 5000);
+  }
+}
+
+function updateStatsReadout(parts) {
+  const sr = document.getElementById('stats-readout');
+  sr.innerHTML = parts;
+  sr.style.display = 'block';
+}
 
 // ─── LOD1 Extrusion Renderer ───────────────────────────────────────────────
 function buildLOD1Scene(data, sourceImageUrl) {
@@ -1412,13 +1452,14 @@ document.getElementById('file-input').addEventListener('change', async () => {
     status.textContent = 'Loaded ' + width + '×' + height + ' · ' + min_height.toFixed(1) + '–' + max_height.toFixed(1) + ' m' + timingStr;
     updateProvenance(meta.provenance || 'relative');
 
-    // Stats readout
-    var sr = document.getElementById('stats-readout');
-    sr.innerHTML =
+    // Stats readout — heightfield path only, LOD1 chain will overwrite below
+    updateStatsReadout(
+      '<span class="warn">Heightfield only</span> · ' +
       '<span class="sv">' + width + '×' + height + '</span> px' +
       ' · <span class="sv">' + min_height.toFixed(1) + '</span>–<span class="sv">' + max_height.toFixed(1) + '</span> m' +
-      (meta.timing ? ' · <span class="sv">' + meta.timing.total + 's</span>' : '');
-    sr.style.display = 'block';
+      (meta.timing ? ' · <span class="sv">' + meta.timing.total + 's</span>' : '') +
+      ' · <span class="warn">LOD1 pending…</span>'
+    );
 
     // Color ramp
     colorRampEl.style.display = 'flex';
@@ -1480,15 +1521,22 @@ document.getElementById('file-input').addEventListener('change', async () => {
     }
 
     // ── Auto-chain: LOD1 metric pipeline ──────────────────────────────────
-    // Run SAM segmentation + height estimation automatically after upload
+    // ALWAYS runs regardless of estimator — estimator controls heightfield
+    // comparison layer only. LOD1 chain is the primary output.
     const samStatus = meta.sam_status || 'loading';
+    setPipelineBanner('LOD1 pipeline: starting…', 'running');
+
     if (samStatus === 'failed') {
-      status.textContent += ' | SAM unavailable — showing relative heightfield only.';
+      setPipelineBanner('LOD1 FAILED — SAM could not load. Showing relative heightfield ONLY.', 'error');
+      updateStatsReadout(
+        '<span class="warn">LOD1 DID NOT RUN</span> · SAM unavailable · ' +
+        '<span class="sv">' + width + '×' + height + '</span> px heightfield only'
+      );
     } else {
       try {
         // Wait for SAM if still loading
         if (samStatus === 'loading') {
-          status.textContent = 'Waiting for SAM to load…';
+          setPipelineBanner('Waiting for SAM model to load…', 'running');
           let samReady = false;
           for (let attempt = 0; attempt < 20; attempt++) {
             await new Promise(r => setTimeout(r, 3000));
@@ -1496,20 +1544,17 @@ document.getElementById('file-input').addEventListener('change', async () => {
             if (hResp.ok) {
               const hData = await hResp.json();
               if (hData.sam === 'ready') { samReady = true; break; }
-              if (hData.sam === 'failed') {
-                status.textContent += ' | SAM failed to load.';
-                break;
-              }
+              if (hData.sam === 'failed') break;
             }
-            status.textContent = 'Waiting for SAM… (' + (attempt + 1) * 3 + 's)';
+            setPipelineBanner('Waiting for SAM… (' + (attempt + 1) * 3 + 's)', 'running');
           }
           if (!samReady) {
-            status.textContent += ' | SAM not available — showing relative heightfield.';
-            throw new Error('SAM not ready');
+            throw new Error('SAM not ready after 60s');
           }
         }
 
-        status.textContent = 'Running SAM segmentation + height estimation… (~20s on CPU)';
+        setPipelineBanner('Running SAM segmentation + height estimation… (~20s on CPU)', 'running');
+        status.textContent = 'Running SAM segmentation + height estimation…';
 
         const gsd = parseFloat(document.getElementById('gsd-slider').value) || 0.5;
         const sunElev = parseFloat(document.getElementById('sun-elev-slider').value) || 45;
@@ -1523,11 +1568,11 @@ document.getElementById('file-input').addEventListener('change', async () => {
 
         if (!samResp.ok) {
           const errJ = await samResp.json().catch(() => ({}));
-          throw new Error(errJ.detail || 'SAM returned ' + samResp.status);
+          throw new Error(errJ.detail || '/estimate-heights returned HTTP ' + samResp.status);
         }
 
         const samData = await samResp.json();
-        console.log('[SAM auto-chain] Response:', samData);
+        console.log('[LOD1 chain] Response:', samData);
 
         if (lastSourceBlobUrl) URL.revokeObjectURL(lastSourceBlobUrl);
         lastSourceBlobUrl = URL.createObjectURL(lastUploadedFile);
@@ -1536,7 +1581,7 @@ document.getElementById('file-input').addEventListener('change', async () => {
         const lod1Result = buildLOD1Scene(samData, lastSourceBlobUrl);
         lod1Instances = samData.instances;
 
-        // Update sun source label with full provenance
+        // ── Sun source label ──
         const sunInfo = samData.sun || {};
         const srcLabels = {
           'metadata': 'from product metadata',
@@ -1551,7 +1596,8 @@ document.getElementById('file-input').addEventListener('change', async () => {
           document.getElementById('sun-elev-slider').value = sunInfo.elevation_deg;
           document.getElementById('sun-elev-val').textContent = sunInfo.elevation_deg.toFixed(0) + '°';
         }
-        // Show cross-check status
+
+        // Cross-check
         if (sunInfo.cross_check) {
           const cc = sunInfo.cross_check;
           let ccText;
@@ -1559,17 +1605,15 @@ document.getElementById('file-input').addEventListener('change', async () => {
             ccText = cc.note;
           } else if (cc.azimuth_delta_deg != null) {
             ccText = cc.consistent
-              ? 'azimuth cross-check: consistent (Δ' + cc.azimuth_delta_deg + '°)'
+              ? 'cross-check: consistent (Δ' + cc.azimuth_delta_deg + '°)'
               : 'WARNING: azimuth Δ' + cc.azimuth_delta_deg + '°';
           }
           if (ccText) {
-            console.log('[Sun]', ccText);
-            const srcLabel = document.getElementById('sun-source-label');
-            srcLabel.textContent += ' · ' + ccText;
+            document.getElementById('sun-source-label').textContent += ' · ' + ccText;
           }
         }
 
-        // Show honest coverage
+        // ── Coverage + stats ──
         const cov = samData.coverage || {};
         const covEl = document.getElementById('coverage-display');
         const measured = cov.directly_measured || 0;
@@ -1579,6 +1623,7 @@ document.getElementById('file-input').addEventListener('change', async () => {
         const total = cov.total_buildings || 0;
         const shadowR = cov.shadow_coherence_R;
         const shadowOk = cov.shadow_reliable !== false;
+        const hs = samData.height_stats || {};
 
         let covText = '';
         if (!shadowOk) {
@@ -1589,51 +1634,64 @@ document.getElementById('file-input').addEventListener('change', async () => {
           if (shadowR != null) covText += ' · R=' + shadowR.toFixed(2);
         }
         covEl.textContent = covText;
-        if (!shadowOk) covEl.style.color = '#e65100';
-        else covEl.style.color = '';
+        covEl.style.color = shadowOk ? '' : '#e65100';
         document.getElementById('coverage-row').style.display = '';
-
-        // Show comparison toggle
         document.getElementById('comparison-toggle-row').style.display = '';
 
-        // Stats
-        const sr = document.getElementById('stats-readout');
-        const hs = samData.height_stats || {};
+        // Stats readout — LOD1 pipeline results
         if (!shadowOk) {
-          sr.innerHTML =
-            '<span class="sv" style="color:#e65100">⚠ Shadow R=' + (shadowR != null ? shadowR.toFixed(2) : '?') + '</span>' +
+          updateStatsReadout(
+            '<span class="sv">LOD1</span>' +
+            ' · <span class="warn">R=' + (shadowR != null ? shadowR.toFixed(2) : '?') + ' — shadows unreliable</span>' +
             ' · <span class="sv">' + total + '</span> buildings' +
             ' · <span class="sv">' + relative + '</span> relative' +
             ' · <span class="sv">' + inferred + '</span> inferred' +
             (hs.mean_m ? ' · mean <span class="sv">' + hs.mean_m.toFixed(1) + ' m</span> (non-metric)' : '') +
-            (samData.timing ? ' · <span class="sv">' + samData.timing.total + 's</span>' : '');
+            (samData.timing ? ' · <span class="sv">' + samData.timing.total + 's</span>' : '')
+          );
+          setPipelineBanner(
+            'LOD1 ran — shadow R=' + (shadowR != null ? shadowR.toFixed(2) : '?') +
+            ', heights are RELATIVE (not metric) for this image',
+            'warn'
+          );
         } else {
-          sr.innerHTML =
-            '<span class="sv">R=' + (shadowR != null ? shadowR.toFixed(2) : '?') + '</span>' +
+          updateStatsReadout(
+            '<span class="sv">LOD1</span>' +
+            ' · <span class="sv">R=' + (shadowR != null ? shadowR.toFixed(2) : '?') + '</span>' +
             ' · <span class="sv">' + total + '</span> buildings' +
             ' · <span class="sv">' + measured + '</span> measured' +
             ' · <span class="sv">' + inferred + '</span> inferred' +
             (hs.mean_m ? ' · mean <span class="sv">' + hs.mean_m.toFixed(1) + ' m</span>' : '') +
-            (samData.timing ? ' · <span class="sv">' + samData.timing.total + 's</span>' : '');
+            (samData.timing ? ' · <span class="sv">' + samData.timing.total + 's</span>' : '')
+          );
+          setPipelineBanner('', 'ok');
         }
-        sr.style.display = 'block';
 
         status.textContent =
           'LOD1: ' + lod1Result.buildings + ' buildings, ' + lod1Result.trees + ' trees' +
-          ' · Sun: ' + (sunInfo.elevation_deg || '?') + '° (' + (sunInfo.source || '?') + ')' +
-          ' · Measured: ' + measured + '/' + total;
+          ' · Sun: ' + (sunInfo.elevation_deg || '?') + '° (' + (sunInfo.source || '?') + ')';
 
       } catch (samErr) {
-        console.warn('[SAM auto-chain] Failed:', samErr.message);
-        if (!status.textContent.includes('SAM')) {
-          status.textContent += ' | LOD1 unavailable: ' + samErr.message;
-        }
+        // LOUD failure — red banner, explicit stats
+        console.error('[LOD1 chain] FAILED:', samErr);
+        setPipelineBanner(
+          'LOD1 FAILED: ' + samErr.message + ' — showing relative heightfield ONLY',
+          'error'
+        );
+        updateStatsReadout(
+          '<span class="warn">LOD1 DID NOT RUN</span>' +
+          ' · Error: ' + samErr.message +
+          ' · <span class="sv">' + width + '×' + height + '</span> px heightfield only'
+        );
+        status.textContent = 'LOD1 FAILED: ' + samErr.message;
       }
     }
 
   } catch (e) {
     console.error('[DepthWizard] upload error:', e);
     status.textContent = 'Error: ' + e.message;
+    setPipelineBanner('Upload failed: ' + e.message, 'error');
+    updateStatsReadout('<span class="warn">Upload failed</span> · ' + e.message);
   }
 });
 
