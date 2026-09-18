@@ -25,6 +25,7 @@ from .calibration import (
 )
 from .estimators.base import HeightEstimator
 from .estimators.synthetic import SyntheticEstimator
+from .flood_model import compute_flood
 from .sam_segmentation import (
     get_mask_generator,
     instances_to_json,
@@ -570,6 +571,25 @@ async def shadow_overlay_endpoint() -> Response:
     buf = _io.BytesIO()
     img.save(buf, format="PNG")
     return Response(content=buf.getvalue(), media_type="image/png")
+
+
+# ── /flood ───────────────────────────────────────────────────────────────────
+@app.get("/flood")
+async def flood_endpoint(
+    water_level: float = Query(..., description="Water level in metres above ground"),
+    gsd: float = Query(default=0.5),
+) -> JSONResponse:
+    """Compute flood impact at a given water level."""
+    instances = _last_prediction.get("instances")
+    if instances is None:
+        raise HTTPException(400, "No segmentation — run /estimate-heights first.")
+
+    result = compute_flood(instances, water_level, gsd_m=gsd)
+    return JSONResponse(content={
+        "water_level_m": result.water_level_m,
+        "aggregate": result.aggregate,
+        "buildings": result.buildings,
+    })
 
 
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

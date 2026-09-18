@@ -309,6 +309,27 @@
     </div>
   </div>
 
+  <!-- FLOOD -->
+  <div class="section collapsed">
+    <div class="section-header"><span class="chev">▾</span>FLOOD ANALYSIS</div>
+    <div class="section-body">
+      <div class="row">
+        <label>Water Level <span class="val" id="flood-level-val">0.0 m</span></label>
+        <input type="range" id="flood-slider" min="0" max="30" step="0.5" value="0">
+      </div>
+      <div id="flood-stats" style="display:none; font-size:11px; padding:4px 16px; line-height:1.6;">
+        <div>Affected: <span id="flood-affected">—</span></div>
+        <div>Dry: <span id="flood-dry">—</span> | Partial: <span id="flood-partial">—</span> | Submerged: <span id="flood-submerged">—</span></div>
+        <div>Mean freeboard: <span id="flood-freeboard">—</span></div>
+        <div>Inundated area: <span id="flood-area">—</span> m²</div>
+        <div>Approx volume: <span id="flood-volume">—</span> m³</div>
+      </div>
+      <div class="row" style="margin-top:4px;">
+        <button id="btn-flood-csv" style="font-size:10px;">Export CSV</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ANALYSIS -->
   <div class="section collapsed">
     <div class="section-header"><span class="chev">▾</span>ANALYSIS</div>
@@ -1665,6 +1686,108 @@ function getLOD1HeightAtPoint(worldX, worldZ) {
   }
   return { height_m: null, label: 'ground' };
 }
+
+// ─── Flood Module ───────────────────────────────────────────────────────────
+let waterMesh = null;
+let lastFloodData = null;
+
+function createWaterMesh(level) {
+  if (waterMesh) scene.remove(waterMesh);
+  if (level <= 0) { waterMesh = null; return; }
+
+  const ve = parseFloat(document.getElementById('ve-slider').value) || 2.0;
+  const waterGeo = new THREE.PlaneGeometry(PLANE_SIZE * 1.2, PLANE_SIZE * 1.2);
+  waterGeo.rotateX(-Math.PI / 2);
+  const waterMat = new THREE.MeshPhongMaterial({
+    color: 0x2266aa,
+    transparent: true,
+    opacity: 0.45,
+    shininess: 90,
+    specular: 0x88bbff,
+    side: THREE.DoubleSide,
+  });
+  waterMesh = new THREE.Mesh(waterGeo, waterMat);
+  waterMesh.position.y = level * ve;
+  waterMesh.renderOrder = 1;
+  scene.add(waterMesh);
+}
+
+let floodDebounce = null;
+document.getElementById('flood-slider').addEventListener('input', function() {
+  const level = parseFloat(this.value);
+  document.getElementById('flood-level-val').textContent = level.toFixed(1) + ' m';
+  createWaterMesh(level);
+
+  clearTimeout(floodDebounce);
+  floodDebounce = setTimeout(() => fetchFloodData(level), 300);
+});
+
+async function fetchFloodData(level) {
+  if (!lod1Instances) return;
+  const gsd = parseFloat(document.getElementById('gsd-slider').value) || 0.5;
+
+  try {
+    const resp = await fetch('/flood?water_level=' + level + '&gsd=' + gsd);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    lastFloodData = data;
+    updateFloodStats(data);
+  } catch (e) {
+    console.warn('Flood fetch error:', e);
+  }
+}
+
+function updateFloodStats(data) {
+  const stats = document.getElementById('flood-stats');
+  stats.style.display = 'block';
+  const agg = data.aggregate || {};
+  document.getElementById('flood-affected').textContent = agg.affected_pct + '% (' + (agg.partially_inundated + agg.fully_submerged) + '/' + agg.total_buildings + ')';
+  document.getElementById('flood-dry').textContent = agg.dry;
+  document.getElementById('flood-partial').textContent = agg.partially_inundated;
+  document.getElementById('flood-submerged').textContent = agg.fully_submerged;
+  document.getElementById('flood-freeboard').textContent = agg.mean_freeboard_m != null ? agg.mean_freeboard_m.toFixed(1) + ' m' : '—';
+  document.getElementById('flood-area').textContent = agg.inundated_area_m2.toFixed(0);
+  document.getElementById('flood-volume').textContent = agg.approx_water_volume_m3.toFixed(0);
+
+  // Color buildings by status in LOD1 scene
+  if (lod1Group) {
+    const bldgResults = data.buildings || [];
+    let bIdx = 0;
+    lod1Group.children.forEach(child => {
+      if (child.userData && child.userData.type === 'building' && bIdx < bldgResults.length) {
+        const status = bldgResults[bIdx].status;
+        if (child.material) {
+          if (status === 'fully_submerged') child.material.color.set(0xcc2222);
+          else if (status === 'partially_inundated') child.material.color.set(0xddaa22);
+          else child.material.color.set(0xcc9966);
+        }
+        bIdx++;
+      }
+    });
+  }
+}
+
+document.getElementById('btn-flood-csv').addEventListener('click', () => {
+  if (!lastFloodData) return;
+  const rows = [['building_height_m', 'water_depth_m', 'submerged_depth_m', 'freeboard_m', 'status', 'area_m2']];
+  (lastFloodData.buildings || []).forEach(b => {
+    rows.push([b.building_height_m, b.water_depth_m, b.submerged_depth_m, b.freeboard_m, b.status, b.area_m2]);
+  });
+  const agg = lastFloodData.aggregate || {};
+  rows.push([]);
+  rows.push(['water_level_m', lastFloodData.water_level_m]);
+  rows.push(['total_buildings', agg.total_buildings]);
+  rows.push(['affected_pct', agg.affected_pct]);
+  rows.push(['inundated_area_m2', agg.inundated_area_m2]);
+  rows.push(['approx_volume_m3', agg.approx_water_volume_m3]);
+
+  const csv = rows.map(r => r.join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'flood_analysis.csv'; a.click();
+  URL.revokeObjectURL(url);
+});
 
 // ─── Resize + render loop ───────────────────────────────────────────────────
 window.addEventListener('resize', () => {
