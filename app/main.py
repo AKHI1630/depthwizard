@@ -31,6 +31,7 @@ from .sam_segmentation import (
     render_segmentation_overlay,
     segment_and_classify,
 )
+from .height_estimation import estimate_heights, height_result_to_json
 from .structure_dsm import structure_aware_dsm
 from .validation import validate as run_validation
 
@@ -479,6 +480,96 @@ async def instances_endpoint() -> JSONResponse:
         "counts": counts,
         "instances": instances_to_json(instances),
     })
+
+
+# ── /estimate-heights ────────────────────────────────────────────────────────
+@app.post("/estimate-heights")
+async def estimate_heights_endpoint(
+    file: UploadFile = File(...),
+    gsd: float = Query(default=0.5, description="Ground sampling distance in metres/pixel"),
+    lat: float = Query(default=None, description="Latitude for sun computation"),
+    lon: float = Query(default=None, description="Longitude for sun computation"),
+    sun_elevation: float = Query(default=None, description="Sun elevation in degrees (override)"),
+    sun_azimuth: float = Query(default=None, description="Sun azimuth in degrees (override)"),
+) -> JSONResponse:
+    """
+    Full pipeline: SAM segmentation → shadow detection → height estimation.
+    Returns per-building metric heights with confidence and coverage stats.
+    """
+    import io as _io
+    import time as _time
+
+    from PIL import Image as PILImage
+    from .sun_geometry import SunPosition
+
+    if not _sam_ready:
+        if _sam_error:
+            raise HTTPException(503, f"SAM failed to load: {_sam_error}")
+        raise HTTPException(503, "SAM still loading — try again shortly.")
+
+    image_bytes = await file.read()
+    if len(image_bytes) == 0:
+        raise HTTPException(400, "Empty file.")
+    if len(image_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "File too large.")
+
+    img = PILImage.open(_io.BytesIO(image_bytes)).convert("RGB")
+    img_array = np.array(img)
+    _last_prediction["_source_image"] = img
+    _last_prediction["_source_bytes"] = image_bytes
+
+    # Segmentation
+    t0 = _time.perf_counter()
+    instances = segment_and_classify(img)
+    t_seg = round(_time.perf_counter() - t0, 2)
+    _last_prediction["instances"] = instances
+
+    # Sun position
+    sun = None
+    if sun_elevation is not None and sun_azimuth is not None:
+        sun = SunPosition(
+            elevation_deg=sun_elevation,
+            azimuth_deg=sun_azimuth,
+            source="user",
+            confidence="high",
+        )
+
+    # Height estimation
+    result = estimate_heights(
+        image_rgb=img_array,
+        instances=instances,
+        sun=sun,
+        image_bytes=image_bytes,
+        gsd_m=gsd,
+        lat=lat,
+        lon=lon,
+    )
+    _last_prediction["height_result"] = result
+
+    result_json = height_result_to_json(result)
+    result_json["segmentation_time_s"] = t_seg
+    logger.info("Height estimation complete: %s", result.coverage)
+    return JSONResponse(content=result_json)
+
+
+@app.get("/shadow-overlay")
+async def shadow_overlay_endpoint() -> Response:
+    """Return shadow detection as a blue-tinted RGBA PNG."""
+    import io as _io
+
+    from PIL import Image as PILImage
+    from .shadow_detection import render_shadow_overlay
+
+    result = _last_prediction.get("height_result")
+    source = _last_prediction.get("_source_image")
+    if result is None or source is None:
+        raise HTTPException(400, "No height estimation — POST to /estimate-heights first.")
+
+    overlay = render_shadow_overlay(np.array(source).shape, result.shadow_blobs)
+    img = PILImage.fromarray(overlay, "RGBA")
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+    return Response(content=buf.getvalue(), media_type="image/png")
 
 
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
