@@ -260,6 +260,8 @@ async def upload(
         meta_dict["structure_stats"] = {
             k: v for k, v in ss.items() if k != "footprints"
         }
+    meta_dict["sam_status"] = "ready" if _sam_ready else ("failed" if _sam_error else "loading")
+
     if warning:
         meta_dict["warning"] = warning
         logger.warning("Fallback active: %s", warning)
@@ -492,16 +494,19 @@ async def estimate_heights_endpoint(
     lon: float = Query(default=None, description="Longitude for sun computation"),
     sun_elevation: float = Query(default=None, description="Sun elevation in degrees (override)"),
     sun_azimuth: float = Query(default=None, description="Sun azimuth in degrees (override)"),
+    sam_max_dim: int = Query(default=512, description="SAM input resolution"),
+    sam_points: int = Query(default=12, description="SAM points_per_side"),
+    metadata_file: UploadFile = File(default=None, description="Sidecar metadata (.IMD/.XML/.MTL)"),
 ) -> JSONResponse:
     """
-    Full pipeline: SAM segmentation → shadow detection → height estimation.
-    Returns per-building metric heights with confidence and coverage stats.
+    Full pipeline: SAM segmentation → shadow detection → multi-cue height estimation.
+    Returns per-building metric heights with confidence and honest coverage stats.
     """
     import io as _io
     import time as _time
 
     from PIL import Image as PILImage
-    from .sun_geometry import SunPosition
+    from .sun_geometry import SunPosition, parse_sidecar_metadata
 
     if not _sam_ready:
         if _sam_error:
@@ -519,13 +524,26 @@ async def estimate_heights_endpoint(
     _last_prediction["_source_image"] = img
     _last_prediction["_source_bytes"] = image_bytes
 
-    # Segmentation
+    # Parse sidecar metadata if provided
+    sidecar_sun = None
+    if metadata_file is not None:
+        try:
+            meta_bytes = await metadata_file.read()
+            sidecar_sun = parse_sidecar_metadata(meta_bytes, metadata_file.filename or "unknown")
+        except Exception as e:
+            logger.warning("Failed to parse sidecar metadata: %s", e)
+
+    # Segmentation with configurable SAM params
     t0 = _time.perf_counter()
-    instances = segment_and_classify(img)
+    instances = segment_and_classify(
+        img,
+        sam_max_dim=sam_max_dim,
+        points_per_side=sam_points,
+    )
     t_seg = round(_time.perf_counter() - t0, 2)
     _last_prediction["instances"] = instances
 
-    # Sun position
+    # Sun position from user slider (lowest priority — estimate_heights handles the chain)
     sun = None
     if sun_elevation is not None and sun_azimuth is not None:
         sun = SunPosition(
@@ -535,7 +553,17 @@ async def estimate_heights_endpoint(
             confidence="high",
         )
 
-    # Height estimation
+    # Run DAv2 inline on the same image for depth calibration (no cross-request state)
+    depth_array = None
+    if _depth_anything is not None:
+        try:
+            t_dav2 = _time.perf_counter()
+            depth_array, _ = _depth_anything.estimate(image_bytes)
+            logger.info("Inline DAv2 for calibration: %.2fs", _time.perf_counter() - t_dav2)
+        except Exception as e:
+            logger.warning("DAv2 depth for calibration failed: %s", e)
+
+    # Multi-cue height estimation
     result = estimate_heights(
         image_rgb=img_array,
         instances=instances,
@@ -544,10 +572,16 @@ async def estimate_heights_endpoint(
         gsd_m=gsd,
         lat=lat,
         lon=lon,
+        depth_array=depth_array,
+        sidecar_sun=sidecar_sun,
     )
     _last_prediction["height_result"] = result
 
-    result_json = height_result_to_json(result)
+    result_json = height_result_to_json(
+        result,
+        image_width=img_array.shape[1],
+        image_height=img_array.shape[0],
+    )
     result_json["segmentation_time_s"] = t_seg
     logger.info("Height estimation complete: %s", result.coverage)
     return JSONResponse(content=result_json)

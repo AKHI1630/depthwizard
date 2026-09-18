@@ -68,12 +68,15 @@ class InstanceMask:
     height_m: Optional[float] = None
     height_confidence: Optional[str] = None
     height_uncertainty_m: Optional[float] = None
+    height_methods: list[str] = field(default_factory=list)
+    height_source: Optional[str] = None
+    shadow_length_px: Optional[float] = None
 
 
-def _load_sam():
-    """Load SAM model. Returns (sam, SamAutomaticMaskGenerator)."""
+def _load_sam_model():
+    """Load SAM model weights (once). Returns the sam model."""
     import torch
-    from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
+    from segment_anything import sam_model_registry
 
     if not SAM_CHECKPOINT.exists():
         raise FileNotFoundError(
@@ -88,28 +91,103 @@ def _load_sam():
     sam = sam_model_registry[SAM_MODEL_TYPE](checkpoint=str(SAM_CHECKPOINT))
     sam.to(device=device)
 
-    mask_generator = SamAutomaticMaskGenerator(
-        model=sam,
-        points_per_side=16,
-        pred_iou_thresh=0.88,
-        stability_score_thresh=0.92,
-        crop_n_layers=0,
-        min_mask_region_area=100,
-    )
-
     logger.info("SAM loaded in %.1f s", time.perf_counter() - t0)
-    return sam, mask_generator
+    return sam
 
 
 _sam_model = None
 _mask_generator = None
+_generator_params: dict = {}
 
 
-def get_mask_generator():
-    global _sam_model, _mask_generator
-    if _mask_generator is None:
-        _sam_model, _mask_generator = _load_sam()
+def get_mask_generator(points_per_side: int = 12, min_mask_region_area: int = 30):
+    global _sam_model, _mask_generator, _generator_params
+    from segment_anything import SamAutomaticMaskGenerator
+
+    if _sam_model is None:
+        _sam_model = _load_sam_model()
+
+    requested = {"points_per_side": points_per_side, "min_mask_region_area": min_mask_region_area}
+    if requested != _generator_params:
+        _mask_generator = SamAutomaticMaskGenerator(
+            model=_sam_model,
+            points_per_side=points_per_side,
+            pred_iou_thresh=0.86,
+            stability_score_thresh=0.92,
+            crop_n_layers=0,
+            min_mask_region_area=min_mask_region_area,
+        )
+        _generator_params = requested
+        logger.info("SAM generator configured: points_per_side=%d, min_mask_region_area=%d",
+                    points_per_side, min_mask_region_area)
     return _mask_generator
+
+
+def split_large_masks(sam_masks: list, image_rgb: np.ndarray, area_factor: float = 3.0) -> list:
+    """Split oversized masks using watershed with distance-transform markers."""
+    if len(sam_masks) < 3:
+        return sam_masks
+
+    areas = [m["area"] for m in sam_masks]
+    median_area = float(np.median(areas))
+    if median_area < 50:
+        return sam_masks
+
+    result = []
+    split_count = 0
+
+    for m in sam_masks:
+        if m["area"] <= area_factor * median_area:
+            result.append(m)
+            continue
+
+        mask_u8 = m["segmentation"].astype(np.uint8) * 255
+        dist = cv2.distanceTransform(mask_u8, cv2.DIST_L2, 5)
+        thresh = 0.5 * dist.max()
+        _, peaks = cv2.threshold(dist, thresh, 255, cv2.THRESH_BINARY)
+        peaks_u8 = peaks.astype(np.uint8)
+        n_labels, markers = cv2.connectedComponents(peaks_u8)
+
+        if n_labels <= 2:
+            result.append(m)
+            continue
+
+        markers = markers + 1
+        markers[mask_u8 == 0] = 0
+
+        h, w = image_rgb.shape[:2]
+        mh, mw = mask_u8.shape
+        if mh == h and mw == w:
+            ws_img = image_rgb.copy()
+        else:
+            ws_img = np.stack([mask_u8, mask_u8, mask_u8], axis=2)
+
+        markers_ws = cv2.watershed(ws_img, markers.astype(np.int32))
+
+        for lbl in range(2, n_labels + 1):
+            sub_mask = (markers_ws == lbl)
+            sub_area = int(sub_mask.sum())
+            if sub_area < 100:
+                continue
+            ys, xs = np.where(sub_mask)
+            bx, by = int(xs.min()), int(ys.min())
+            bw, bh = int(xs.max()) - bx, int(ys.max()) - by
+            result.append({
+                "segmentation": sub_mask,
+                "area": sub_area,
+                "bbox": [bx, by, bw, bh],
+                "predicted_iou": m.get("predicted_iou", 0.8),
+                "stability_score": m.get("stability_score", 0.8),
+            })
+            split_count += 1
+
+        if split_count == 0:
+            result.append(m)
+
+    if split_count > 0:
+        logger.info("Watershed split: %d large masks → %d total sub-masks", split_count, len(result) - len(sam_masks) + split_count)
+
+    return result
 
 
 def compute_mask_features(mask_bool: np.ndarray, image_rgb: np.ndarray) -> dict:
@@ -235,16 +313,14 @@ def classify_mask(feats: dict) -> tuple[str, float]:
     return "ground", 0.5
 
 
-def segment_and_classify(image: Image.Image) -> list[InstanceMask]:
-    """
-    Run SAM automatic mask generation + shape/colour classification.
-
-    Args:
-        image: PIL RGB image of the satellite tile
-
-    Returns:
-        List of InstanceMask objects, one per detected instance
-    """
+def segment_and_classify(
+    image: Image.Image,
+    sam_max_dim: int = 512,
+    points_per_side: int = 12,
+    min_mask_region_area: int = 30,
+    watershed_area_factor: float = 2.0,
+) -> list[InstanceMask]:
+    """Run SAM automatic mask generation + shape/colour classification."""
     img_array = np.array(image)
     if img_array.ndim == 2:
         img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
@@ -252,17 +328,42 @@ def segment_and_classify(image: Image.Image) -> list[InstanceMask]:
         img_array = img_array[:, :, :3]
 
     h, w = img_array.shape[:2]
-    logger.info("SAM segmentation on %d×%d image", w, h)
+    logger.info("SAM segmentation on %d×%d image (max_dim=%d, pts=%d)", w, h, sam_max_dim, points_per_side)
     t0 = time.perf_counter()
 
-    generator = get_mask_generator()
-    sam_masks = generator.generate(img_array)
+    scale_factor = 1.0
+    sam_input = img_array
+    if max(h, w) > sam_max_dim:
+        scale_factor = sam_max_dim / max(h, w)
+        new_w, new_h = int(w * scale_factor), int(h * scale_factor)
+        sam_input = cv2.resize(img_array, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        logger.info("Downscaled %d×%d → %d×%d (factor %.2f) for SAM", w, h, new_w, new_h, scale_factor)
+
+    generator = get_mask_generator(points_per_side=points_per_side, min_mask_region_area=min_mask_region_area)
+    sam_masks = generator.generate(sam_input)
+
+    # Upscale masks back to original resolution if downscaled
+    if scale_factor < 1.0:
+        for m in sam_masks:
+            small_mask = m["segmentation"]
+            m["segmentation"] = cv2.resize(
+                small_mask.astype(np.uint8), (w, h),
+                interpolation=cv2.INTER_NEAREST
+            ).astype(bool)
+            m["area"] = int(m["segmentation"].sum())
+            if "bbox" in m:
+                bx, by, bw, bh = m["bbox"]
+                inv = 1.0 / scale_factor
+                m["bbox"] = [int(bx * inv), int(by * inv), int(bw * inv), int(bh * inv)]
 
     t_sam = time.perf_counter() - t0
     logger.info("SAM generated %d masks in %.1f s", len(sam_masks), t_sam)
 
     # Sort by area descending
     sam_masks.sort(key=lambda m: m["area"], reverse=True)
+
+    # Split oversized masks (touching buildings)
+    sam_masks = split_large_masks(sam_masks, img_array, area_factor=watershed_area_factor)
 
     instances = []
     t_classify = time.perf_counter()
@@ -277,7 +378,7 @@ def segment_and_classify(image: Image.Image) -> list[InstanceMask]:
 
         reg_poly = None
         if label == "building" and feats["contour"] is not None:
-            reg_poly = regularise_polygon(feats["contour"])
+            reg_poly = regularise_polygon(feats["contour"], image_shape=img_array.shape[:2])
 
         instance = InstanceMask(
             mask=mask_bool,
@@ -306,6 +407,17 @@ def segment_and_classify(image: Image.Image) -> list[InstanceMask]:
         ", ".join(f"{k}: {v}" for k, v in sorted(counts.items())),
     )
 
+    building_areas = sorted(
+        [inst.area for inst in instances if inst.label == "building"]
+    )
+    if building_areas:
+        pcts = np.percentile(building_areas, [10, 25, 50, 75, 90])
+        logger.info(
+            "Building area histogram (px): p10=%d p25=%d p50=%d p75=%d p90=%d  n=%d  range=[%d, %d]",
+            int(pcts[0]), int(pcts[1]), int(pcts[2]), int(pcts[3]), int(pcts[4]),
+            len(building_areas), building_areas[0], building_areas[-1],
+        )
+
     return instances
 
 
@@ -330,13 +442,9 @@ def render_segmentation_overlay(
     return overlay
 
 
-def regularise_polygon(contour: np.ndarray, epsilon_frac: float = 0.02) -> np.ndarray:
-    """
-    Douglas-Peucker simplification + edge snapping to dominant orientations.
-
-    For rectilinear buildings: finds the two dominant edge angles,
-    then snaps each simplified vertex to the nearest dominant direction.
-    """
+def regularise_polygon(contour: np.ndarray, epsilon_frac: float = 0.02,
+                       image_shape: Optional[tuple[int, int]] = None) -> np.ndarray:
+    """Douglas-Peucker simplification + edge snapping to dominant orientations."""
     perimeter = cv2.arcLength(contour, True)
     epsilon = epsilon_frac * perimeter
     simplified = cv2.approxPolyDP(contour, epsilon, True)
@@ -389,18 +497,35 @@ def regularise_polygon(contour: np.ndarray, epsilon_frac: float = 0.02) -> np.nd
             projected = np.dot(edge, direction)
             snapped[j] = snapped[i] + direction * projected
 
+    if image_shape is not None:
+        h_img, w_img = image_shape
+        before = snapped.copy()
+        snapped[:, 0] = np.clip(snapped[:, 0], 0, w_img - 1)
+        snapped[:, 1] = np.clip(snapped[:, 1], 0, h_img - 1)
+        oob = np.any(before != snapped)
+        if oob:
+            logger.warning("Polygon vertex clamped to image bounds (%dx%d)", w_img, h_img)
+
     return snapped.reshape(-1, 1, 2).astype(np.int32)
 
 
-def instances_to_json(instances: list[InstanceMask]) -> list[dict]:
+def instances_to_json(instances: list[InstanceMask], image_shape: Optional[tuple[int, int]] = None) -> list[dict]:
     """Convert instance list to JSON-serialisable format."""
     result = []
     for inst in instances:
+        bx, by, bw, bh = inst.bbox
+        if image_shape is not None:
+            ih, iw = image_shape
+            bx = max(0, bx)
+            by = max(0, by)
+            bw = min(bw, iw - bx)
+            bh = min(bh, ih - by)
+
         d = {
             "label": inst.label,
             "confidence": round(inst.confidence, 3),
             "area_px": inst.area,
-            "bbox": list(inst.bbox),
+            "bbox": [bx, by, bw, bh],
             "rectangularity": inst.rectangularity,
             "solidity": inst.solidity,
             "aspect_ratio": inst.aspect_ratio,
@@ -412,7 +537,20 @@ def instances_to_json(instances: list[InstanceMask]) -> list[dict]:
             d["height_m"] = round(inst.height_m, 2)
             d["height_confidence"] = inst.height_confidence
             d["height_uncertainty_m"] = round(inst.height_uncertainty_m, 2) if inst.height_uncertainty_m else None
+        elif inst.height_confidence:
+            d["height_m"] = None
+            d["height_confidence"] = inst.height_confidence
+        if inst.shadow_length_px is not None:
+            d["shadow_length_px"] = round(inst.shadow_length_px, 1)
+        if inst.height_methods:
+            d["height_methods"] = inst.height_methods
+        if inst.height_source:
+            d["height_source"] = inst.height_source
         if inst.regularised_polygon is not None:
-            d["polygon"] = inst.regularised_polygon.reshape(-1, 2).tolist()
+            poly = inst.regularised_polygon.reshape(-1, 2).tolist()
+            if image_shape is not None:
+                ih, iw = image_shape
+                poly = [[max(0, min(x, iw - 1)), max(0, min(y, ih - 1))] for x, y in poly]
+            d["polygon"] = poly
         result.append(d)
     return result

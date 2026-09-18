@@ -1,13 +1,15 @@
 """
-Shadow-based metric height estimation pipeline.
+Multi-cue metric height estimation pipeline.
 
 Ties together: SAM segmentation → shadow detection → sun geometry →
-per-building height computation with confidence and error bars.
+5 independent height methods → inverse-variance fusion → honest coverage.
 
-h = L_shadow * tan(θ_sun)
-
-where L_shadow is the median shadow length in metres and θ_sun
-is the sun elevation angle.
+Methods:
+  A. Shadow length: h = L_shadow × tan(θ_sun)
+  B. Facade (visible wall) height
+  C. Building lean / relief displacement
+  D. DAv2 depth calibrated against shadow anchors
+  E. Neighbourhood prior (inverse-distance weighted)
 """
 import logging
 import time
@@ -24,7 +26,26 @@ from .shadow_detection import (
     match_shadows_to_buildings,
     measure_shadow_length,
 )
-from .sun_geometry import SunPosition, sun_from_datetime, sun_from_metadata, estimate_sun_from_shadows
+from .sun_geometry import (
+    SunPosition,
+    SunSourceLog,
+    cross_check_sun_sources,
+    cross_check_sun_sources_pair,
+    estimate_sun_from_shadows,
+    sun_from_datetime,
+    sun_from_metadata,
+)
+from .height_fusion import (
+    HeightEstimate,
+    FusedHeight,
+    estimate_shadow_height,
+    estimate_facade_height,
+    estimate_lean_height,
+    calibrate_depth_to_height,
+    estimate_dav2_calibrated,
+    estimate_neighbour_prior,
+    fuse_heights,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +55,10 @@ class HeightResult:
     instances: list[InstanceMask]
     sun: SunPosition
     shadow_blobs: list[ShadowBlob]
-    gsd_m: float                # ground sampling distance in metres/pixel
+    gsd_m: float
     timing: dict
-    coverage: dict              # {total_buildings, with_height, interpolated, no_height}
+    coverage: dict
+    sun_sources: Optional[SunSourceLog] = None
 
 
 def estimate_heights(
@@ -48,32 +70,63 @@ def estimate_heights(
     lat: Optional[float] = None,
     lon: Optional[float] = None,
     capture_dt: Optional[datetime] = None,
+    depth_array: Optional[np.ndarray] = None,
+    off_nadir_deg: Optional[float] = None,
+    sidecar_sun: Optional[SunPosition] = None,
 ) -> HeightResult:
     """
-    Full height estimation pipeline.
+    Full multi-cue height estimation pipeline.
 
     Args:
         image_rgb: H×W×3 uint8
         instances: pre-computed SAM instances with classification
-        sun: sun position (if known). If None, attempts metadata → computed → estimated.
+        sun: sun position override (user slider). If None, attempts metadata → computed → estimated.
         image_bytes: original file bytes for metadata extraction
-        gsd_m: ground sampling distance in metres/pixel (default 0.5m for high-res sat)
+        gsd_m: ground sampling distance in metres/pixel
         lat, lon: geographic coordinates for sun computation
         capture_dt: capture datetime for sun computation
-
-    Returns:
-        HeightResult with per-building heights, confidence, and coverage stats
+        depth_array: DAv2 depth map (run inline, not from cross-request state)
+        off_nadir_deg: off-nadir angle for lean method
+        sidecar_sun: sun position from sidecar metadata file
     """
     timing = {}
     t_total = time.perf_counter()
+    sun_log = SunSourceLog()
 
-    # 1. Determine sun position
+    # 1. Determine sun position via priority chain
     t0 = time.perf_counter()
-    if sun is None:
-        if image_bytes:
-            sun = sun_from_metadata(image_bytes)
-        if sun is None and lat is not None and lon is not None and capture_dt is not None:
-            sun = sun_from_datetime(lat, lon, capture_dt)
+
+    # Track user slider if provided
+    if sun is not None and sun.source == "user":
+        sun_log.slider = {"elevation": sun.elevation_deg, "azimuth": sun.azimuth_deg}
+
+    # Priority 1: sidecar metadata
+    resolved_sun = None
+    if sidecar_sun is not None:
+        resolved_sun = sidecar_sun
+        sun_log.metadata = {
+            "elevation": sidecar_sun.elevation_deg,
+            "azimuth": sidecar_sun.azimuth_deg,
+            "format": "sidecar",
+        }
+
+    # Priority 1b: EXIF metadata
+    if resolved_sun is None and image_bytes:
+        exif_sun = sun_from_metadata(image_bytes)
+        if exif_sun is not None:
+            resolved_sun = exif_sun
+            sun_log.metadata = {
+                "elevation": exif_sun.elevation_deg,
+                "azimuth": exif_sun.azimuth_deg,
+                "format": "exif",
+            }
+
+    # Priority 2: computed from date/time/location
+    if lat is not None and lon is not None and capture_dt is not None:
+        computed = sun_from_datetime(lat, lon, capture_dt)
+        sun_log.computed = {"elevation": computed.elevation_deg, "azimuth": computed.azimuth_deg}
+        if resolved_sun is None:
+            resolved_sun = computed
 
     # 2. Detect shadows
     building_instances = [inst for inst in instances if inst.label == "building"]
@@ -84,142 +137,283 @@ def estimate_heights(
     shadow_blobs = match_shadows_to_buildings(shadow_blobs, building_masks)
     timing["shadow_detection"] = round(time.perf_counter() - t_shadow, 2)
 
-    # 3. If no sun position yet, estimate from shadows
-    if sun is None:
-        pairs = [(b.building_idx, i) for i, b in enumerate(shadow_blobs) if b.building_idx is not None]
-        shadow_masks_list = [b.mask for b in shadow_blobs]
-        sun = estimate_sun_from_shadows(image_rgb, building_masks, shadow_masks_list, pairs)
+    # Priority 3: measured azimuth from shadows (always run for cross-check)
+    pairs = [(b.building_idx, i) for i, b in enumerate(shadow_blobs) if b.building_idx is not None]
+    shadow_masks_list = [b.mask for b in shadow_blobs]
+    measured_sun = estimate_sun_from_shadows(image_rgb, building_masks, shadow_masks_list, pairs)
+    if measured_sun.source != "default":
+        sun_log.measured_azimuth = measured_sun.azimuth_deg
+    sun_log.measured_coherence_R = measured_sun.coherence_R
+    sun_log.measured_n_pairs = measured_sun.n_shadow_pairs
+
+    if resolved_sun is None:
+        if measured_sun.source != "default":
+            resolved_sun = measured_sun
+        elif sun is not None:
+            resolved_sun = sun
+        else:
+            resolved_sun = measured_sun  # fallback default
+
+    # Cross-check: compare independent azimuth sources pairwise.
+    # Collect all available azimuths with their provenance.
+    available_azimuths: list[tuple[str, float]] = []
+    if sun_log.metadata:
+        available_azimuths.append(("metadata", sun_log.metadata["azimuth"]))
+    if sun_log.computed:
+        available_azimuths.append(("computed", sun_log.computed["azimuth"]))
+    if sun_log.measured_azimuth is not None:
+        available_azimuths.append(("measured", sun_log.measured_azimuth))
+    if sun_log.slider:
+        available_azimuths.append(("slider", sun_log.slider["azimuth"]))
+
+    if len(available_azimuths) >= 2:
+        # Pick the two highest-priority independent sources for the headline check.
+        # Priority: metadata > computed > measured > slider
+        src_a, az_a = available_azimuths[0]
+        src_b, az_b = available_azimuths[1]
+        sun_log.cross_check = cross_check_sun_sources_pair(src_a, az_a, src_b, az_b)
+    elif len(available_azimuths) == 1:
+        src_only, _ = available_azimuths[0]
+        sun_log.cross_check = {
+            "azimuth_delta_deg": None,
+            "consistent": None,
+            "note": f"single source ({src_only}) — no independent validation",
+        }
+        logger.info("Sun cross-check: only %s azimuth available — no independent validation", src_only)
 
     timing["sun_geometry"] = round(time.perf_counter() - t0, 2)
     logger.info("Sun: elevation=%.1f°, azimuth=%.1f°, source=%s, confidence=%s",
-                sun.elevation_deg, sun.azimuth_deg, sun.source, sun.confidence)
+                resolved_sun.elevation_deg, resolved_sun.azimuth_deg,
+                resolved_sun.source, resolved_sun.confidence)
 
-    # 4. Measure shadow lengths and compute heights
+    # Log all available sun sources
+    sources_str = []
+    if sun_log.metadata:
+        sources_str.append(f"metadata={sun_log.metadata['elevation']:.1f}°/{sun_log.metadata['azimuth']:.1f}°")
+    if sun_log.computed:
+        sources_str.append(f"computed={sun_log.computed['elevation']:.1f}°/{sun_log.computed['azimuth']:.1f}°")
+    if sun_log.measured_azimuth is not None:
+        sources_str.append(f"measured_az={sun_log.measured_azimuth:.1f}°")
+    if sun_log.slider:
+        sources_str.append(f"slider={sun_log.slider['elevation']:.1f}°/{sun_log.slider['azimuth']:.1f}°")
+    if sources_str:
+        logger.info("Sun sources: %s", ", ".join(sources_str))
+
+    # 3. Multi-cue height estimation
     t_height = time.perf_counter()
+    image_center = (image_rgb.shape[1] / 2.0, image_rgb.shape[0] / 2.0)
 
-    if sun.elevation_deg <= 0:
-        logger.warning("Sun below horizon (%.1f°) — no shadow heights possible", sun.elevation_deg)
+    # Quality gate: shadow coherence R < 0.5 means shadow directions are
+    # nearly random — shadow lengths are unreliable for metric heights.
+    shadow_coherence_R = measured_sun.coherence_R
+    shadow_reliable = shadow_coherence_R is not None and shadow_coherence_R >= 0.5
+    if not shadow_reliable:
+        R_str = f"{shadow_coherence_R:.2f}" if shadow_coherence_R is not None else "N/A"
+        logger.warning(
+            "Shadow coherence R=%s < 0.5 — shadow detection unreliable for this image. "
+            "Shadow-derived heights will be labelled RELATIVE, not metric.",
+            R_str,
+        )
+
+    if resolved_sun.elevation_deg <= 0:
+        logger.warning("Sun below horizon (%.1f°) — no shadow heights possible", resolved_sun.elevation_deg)
         for inst in building_instances:
             inst.height_m = None
             inst.height_confidence = "unavailable"
             inst.height_uncertainty_m = None
+            inst.height_methods = []
+            inst.height_source = None
     else:
-        tan_elev = np.tan(np.radians(sun.elevation_deg))
-
-        heights_computed = []
+        # Phase A: shadow heights for all buildings
         for inst in building_instances:
-            matched_shadows = [b for b in shadow_blobs if b.building_idx is not None
-                               and building_masks[b.building_idx] is inst.mask]
-            if not matched_shadows:
-                inst.height_m = None
-                inst.height_confidence = "no_shadow"
-                inst.height_uncertainty_m = None
-                continue
+            est = estimate_shadow_height(inst, shadow_blobs, building_masks, resolved_sun, gsd_m)
+            if est is not None:
+                inst.height_m = round(est.height_m, 2)
+                inst.height_uncertainty_m = round(est.uncertainty_m, 2)
+                inst.shadow_length_px = round(est.height_m / (gsd_m * np.tan(np.radians(resolved_sun.elevation_deg))), 1) if gsd_m > 0 else None
+                if shadow_reliable:
+                    inst.height_confidence = "high" if resolved_sun.confidence == "high" else "medium"
+                    inst.height_source = "measured"
+                else:
+                    inst.height_confidence = "low"
+                    inst.height_source = "relative"
+                inst.height_methods = ["shadow"]
 
-            shadow_lengths_px = []
-            for sb in matched_shadows:
-                length = measure_shadow_length(sb, inst.mask, sun.azimuth_deg)
-                if length > 0:
-                    sb.shadow_length_px = length
-                    shadow_lengths_px.append(length)
+        # Phase D: DAv2 calibration using shadow anchors
+        # Only calibrate against shadow heights if shadows are reliable
+        dav2_calibration = None
+        if depth_array is not None and shadow_reliable:
+            dav2_calibration = calibrate_depth_to_height(building_instances, depth_array)
 
-            if not shadow_lengths_px:
-                inst.height_m = None
-                inst.height_confidence = "no_measurable_shadow"
-                inst.height_uncertainty_m = None
-                continue
+        # Phase B/C/D/E: additional methods per building
+        for inst in building_instances:
+            estimates: list[Optional[HeightEstimate]] = []
 
-            median_length_px = np.median(shadow_lengths_px)
-            shadow_length_m = median_length_px * gsd_m
-            height_m = shadow_length_m * tan_elev
+            # A: shadow (include in fusion only if coherent)
+            if inst.height_m is not None and inst.height_source in ("measured", "relative"):
+                shadow_est = HeightEstimate(
+                    height_m=inst.height_m,
+                    uncertainty_m=inst.height_uncertainty_m or 1.0,
+                    method="shadow",
+                )
+                if not shadow_reliable:
+                    shadow_est.uncertainty_m = max(shadow_est.uncertainty_m, inst.height_m * 0.5)
+                estimates.append(shadow_est)
 
-            # Uncertainty from shadow length variance + sun angle uncertainty
-            if len(shadow_lengths_px) > 1:
-                length_std_px = np.std(shadow_lengths_px)
-                length_std_m = length_std_px * gsd_m
+            # B: facade
+            facade_est = estimate_facade_height(inst, image_rgb, resolved_sun, gsd_m)
+            if facade_est is not None:
+                estimates.append(facade_est)
+
+            # C: lean
+            lean_est = estimate_lean_height(inst, image_center, gsd_m, off_nadir_deg)
+            if lean_est is not None:
+                estimates.append(lean_est)
+
+            # D: DAv2 calibrated (only if shadow anchors were reliable)
+            if depth_array is not None and dav2_calibration is not None:
+                a, b, residual_std = dav2_calibration
+                dav2_est = estimate_dav2_calibrated(inst, depth_array, (a, b), residual_std)
+                if dav2_est is not None:
+                    estimates.append(dav2_est)
+
+            # E: neighbour prior (only if no direct measurement)
+            has_measured = any(e.method in ("shadow", "facade", "lean") for e in estimates if e is not None)
+            if not has_measured:
+                nbr_est = estimate_neighbour_prior(inst, building_instances)
+                if nbr_est is not None:
+                    estimates.append(nbr_est)
+
+            # Fuse all estimates
+            if estimates:
+                fused = fuse_heights(estimates)
+                if fused is not None:
+                    inst.height_m = round(fused.height_m, 2)
+                    inst.height_uncertainty_m = round(fused.uncertainty_m, 2)
+                    inst.height_methods = fused.methods
+                    if not shadow_reliable:
+                        inst.height_source = "relative"
+                        inst.height_confidence = "low"
+                    else:
+                        inst.height_source = fused.source
+                        if fused.low_confidence_flag:
+                            inst.height_confidence = "low"
+                        elif fused.source == "measured":
+                            inst.height_confidence = "high" if resolved_sun.confidence == "high" else "medium"
+                        else:
+                            inst.height_confidence = "low"
             else:
-                length_std_m = 1.0 * gsd_m  # assume 1px uncertainty
-
-            # Propagate sun elevation uncertainty (±5° if estimated)
-            elev_uncertainty = 5.0 if sun.confidence != "high" else 2.0
-            elev_lo = max(1, sun.elevation_deg - elev_uncertainty)
-            elev_hi = sun.elevation_deg + elev_uncertainty
-            h_lo = shadow_length_m * np.tan(np.radians(elev_lo))
-            h_hi = shadow_length_m * np.tan(np.radians(elev_hi))
-            height_uncertainty = max(abs(h_hi - height_m), abs(height_m - h_lo), length_std_m * tan_elev)
-
-            # Sanity clamp
-            if height_m < 1.0:
                 inst.height_m = None
-                inst.height_confidence = "too_short"
+                inst.height_confidence = "no_measurement"
                 inst.height_uncertainty_m = None
-                continue
-            if height_m > 300:
-                inst.height_m = None
-                inst.height_confidence = "unreasonable"
-                inst.height_uncertainty_m = None
-                continue
+                inst.height_methods = []
+                inst.height_source = None
 
-            inst.height_m = round(height_m, 2)
-            inst.height_uncertainty_m = round(height_uncertainty, 2)
-            inst.height_confidence = "high" if sun.confidence == "high" and len(shadow_lengths_px) > 1 else "medium"
-            heights_computed.append(height_m)
-
-        # 5. Interpolate missing heights from neighbourhood median
-        if heights_computed:
-            neighbourhood_median = float(np.median(heights_computed))
-            for inst in building_instances:
-                if inst.height_m is None and inst.height_confidence in ("no_shadow", "no_measurable_shadow"):
-                    inst.height_m = round(neighbourhood_median, 2)
-                    inst.height_confidence = "interpolated"
-                    inst.height_uncertainty_m = round(float(np.std(heights_computed)) if len(heights_computed) > 1 else neighbourhood_median * 0.3, 2)
+    # Check for suspicious patterns
+    shadow_pxs = [i.shadow_length_px for i in building_instances
+                  if i.shadow_length_px is not None]
+    if shadow_pxs:
+        if all(v == 0 for v in shadow_pxs):
+            logger.warning("ALL shadow lengths are ZERO — heights are fallbacks, not measurements")
+        elif len(set(round(v, 0) for v in shadow_pxs)) == 1 and len(shadow_pxs) > 2:
+            logger.warning(
+                "ALL %d shadow lengths are identical (%.1fpx) — likely detection artefact",
+                len(shadow_pxs), shadow_pxs[0],
+            )
 
     timing["height_computation"] = round(time.perf_counter() - t_height, 2)
     timing["total"] = round(time.perf_counter() - t_total, 2)
 
-    # 6. Coverage stats
+    # 4. Honest coverage stats
     total_bldg = len(building_instances)
-    with_height = sum(1 for i in building_instances if i.height_m is not None and i.height_confidence not in ("interpolated",))
-    interpolated = sum(1 for i in building_instances if i.height_confidence == "interpolated")
-    no_height = sum(1 for i in building_instances if i.height_m is None)
+    directly_measured = sum(1 for i in building_instances if i.height_source == "measured")
+    relative_only = sum(1 for i in building_instances if i.height_source == "relative")
+    inferred = sum(1 for i in building_instances if i.height_source == "inferred")
+    failed = sum(1 for i in building_instances if i.height_m is None)
 
     coverage = {
         "total_buildings": total_bldg,
-        "with_confident_height": with_height,
-        "interpolated": interpolated,
-        "no_height": no_height,
-        "coverage_pct": round(100 * (with_height + interpolated) / max(total_bldg, 1), 1),
+        "directly_measured": directly_measured,
+        "relative": relative_only,
+        "inferred": inferred,
+        "failed": failed,
+        "shadow_coherence_R": round(float(shadow_coherence_R), 3) if shadow_coherence_R is not None else None,
+        "shadow_reliable": shadow_reliable,
     }
 
-    logger.info("Height coverage: %d/%d confident, %d interpolated, %d no height (%.1f%% coverage)",
-                with_height, total_bldg, interpolated, no_height, coverage["coverage_pct"])
+    if shadow_reliable:
+        logger.info("Height coverage: %d/%d measured, %d inferred, %d failed (R=%.2f, shadows reliable)",
+                     directly_measured, total_bldg, inferred, failed, shadow_coherence_R or 0)
+    else:
+        logger.warning(
+            "Height coverage: %d relative, %d inferred, %d failed of %d buildings — "
+            "shadow detection UNRELIABLE (R=%.2f), heights are NOT metric",
+            relative_only, inferred, failed, total_bldg, shadow_coherence_R or 0,
+        )
+
+    # Per-building table log
+    header = f"{'id':>3} | {'area_px':>7} | {'shadow':>7} | {'dav2_cal':>8} | {'nbr_pri':>7} | {'fused':>6} | {'±unc':>5} | {'methods':<20} | {'source':<10}"
+    logger.info("Per-building table:\n%s\n%s", header, "-" * len(header))
+    for idx, inst in enumerate(building_instances):
+        methods_str = "+".join(inst.height_methods) if inst.height_methods else "--"
+        h_str = f"{inst.height_m:.1f}" if inst.height_m is not None else "--"
+        u_str = f"{inst.height_uncertainty_m:.1f}" if inst.height_uncertainty_m is not None else "--"
+        src_str = inst.height_source or "--"
+        logger.info(
+            "%3d | %7d | %7s | %8s | %7s | %6s | %5s | %-20s | %-10s",
+            idx + 1, inst.area, "--", "--", "--",
+            h_str, u_str, methods_str, src_str,
+        )
 
     return HeightResult(
         instances=instances,
-        sun=sun,
+        sun=resolved_sun,
         shadow_blobs=shadow_blobs,
         gsd_m=gsd_m,
         timing=timing,
         coverage=coverage,
+        sun_sources=sun_log,
     )
 
 
-def height_result_to_json(result: HeightResult) -> dict:
+def height_result_to_json(result: HeightResult, image_width: int = 512, image_height: int = 512) -> dict:
     """Convert HeightResult to JSON-serialisable dict."""
     from .sam_segmentation import instances_to_json
 
     buildings = [i for i in result.instances if i.label == "building"]
     heights = [i.height_m for i in buildings if i.height_m is not None]
 
+    sun_dict = {
+        "elevation_deg": round(result.sun.elevation_deg, 1),
+        "azimuth_deg": round(result.sun.azimuth_deg, 1),
+        "source": result.sun.source,
+        "confidence": result.sun.confidence,
+    }
+
+    if result.sun_sources:
+        sl = result.sun_sources
+        sun_dict["all_sources"] = {}
+        if sl.metadata:
+            sun_dict["all_sources"]["metadata"] = sl.metadata
+        if sl.computed:
+            sun_dict["all_sources"]["computed"] = sl.computed
+        if sl.measured_azimuth is not None:
+            sun_dict["all_sources"]["measured_azimuth"] = {
+                "azimuth": sl.measured_azimuth,
+                "coherence_R": sl.measured_coherence_R,
+                "n_pairs": sl.measured_n_pairs,
+            }
+        if sl.slider:
+            sun_dict["all_sources"]["slider"] = sl.slider
+        if sl.cross_check:
+            sun_dict["cross_check"] = sl.cross_check
+
     return {
-        "sun": {
-            "elevation_deg": round(result.sun.elevation_deg, 1),
-            "azimuth_deg": round(result.sun.azimuth_deg, 1),
-            "source": result.sun.source,
-            "confidence": result.sun.confidence,
-        },
+        "sun": sun_dict,
         "gsd_m": result.gsd_m,
         "coverage": result.coverage,
+        "image_width": image_width,
+        "image_height": image_height,
         "height_stats": {
             "min_m": round(min(heights), 2) if heights else None,
             "max_m": round(max(heights), 2) if heights else None,
@@ -228,5 +422,5 @@ def height_result_to_json(result: HeightResult) -> dict:
             "std_m": round(float(np.std(heights)), 2) if len(heights) > 1 else None,
         },
         "timing": result.timing,
-        "instances": instances_to_json(result.instances),
+        "instances": instances_to_json(result.instances, image_shape=(image_height, image_width)),
     }

@@ -242,17 +242,22 @@
         <div class="upload-btn accent" onclick="document.getElementById('file-input').click()">Choose file…</div>
         <input type="file" id="file-input" accept="image/*,.tif,.tiff" style="display:none">
       </div>
-      <div class="row" style="margin-top:4px;">
-        <label>SAM Pipeline</label>
-        <div class="upload-btn" id="btn-segment" style="font-size:11px;">Segment &amp; Build 3D</div>
-      </div>
-      <div class="row" style="display:none;" id="sun-row">
-        <label>Sun Elevation <span class="val" id="sun-elev-val">45°</span></label>
+      <div class="row" id="sun-row">
+        <label>Sun Elevation <span class="val" id="sun-elev-val">45°</span> <span class="val" id="sun-source-label" style="color:#8a9ab0;font-size:10px;">(user-supplied)</span></label>
         <input type="range" id="sun-elev-slider" min="5" max="85" step="1" value="45">
       </div>
-      <div class="row" style="display:none;" id="gsd-row">
+      <div class="row" id="gsd-row">
         <label>GSD (m/px) <span class="val" id="gsd-val">0.50</span></label>
         <input type="range" id="gsd-slider" min="0.1" max="5.0" step="0.05" value="0.50">
+      </div>
+      <div class="row" id="comparison-toggle-row" style="display:none;margin-top:4px;">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+          <input type="checkbox" id="heightfield-toggle" style="margin:0;">
+          <span style="font-size:11px;">Relative Relief (non-metric comparison)</span>
+        </label>
+      </div>
+      <div class="row" id="coverage-row" style="display:none;margin-top:4px;">
+        <span id="coverage-display" style="font-size:12px;color:#7ec8e3;font-weight:500;"></span>
       </div>
     </div>
   </div>
@@ -645,6 +650,10 @@ let flythroughActive = false;
 let lod1Group = null; // THREE.Group for LOD1 buildings/trees
 let lod1Active = false;
 let lod1Instances = null; // instance data from /estimate-heights
+let lod1ImageW = 512, lod1ImageH = 512; // from API response
+let lod1DefaultCam = null; // auto-fit camera target
+let lastUploadedFile = null;
+let lastSourceBlobUrl = null;
 
 // ─── LOD1 Extrusion Renderer ───────────────────────────────────────────────
 function buildLOD1Scene(data, sourceImageUrl) {
@@ -655,7 +664,10 @@ function buildLOD1Scene(data, sourceImageUrl) {
   lod1Instances = data.instances;
 
   const instances = data.instances || [];
-  const imgW = 512, imgH = 512; // assume square; adjust if metadata says otherwise
+  const imgW = data.image_width || 512;
+  const imgH = data.image_height || 512;
+  lod1ImageW = imgW;
+  lod1ImageH = imgH;
   const scaleX = PLANE_SIZE / imgW;
   const scaleZ = PLANE_SIZE / imgH;
   const offsetX = -PLANE_SIZE / 2;
@@ -664,15 +676,28 @@ function buildLOD1Scene(data, sourceImageUrl) {
   // Exaggeration factor
   const ve = parseFloat(document.getElementById('ve-slider').value) || 2.0;
 
-  // Building material
-  const bldgMat = new THREE.MeshPhongMaterial({
-    color: 0xcc9966, specular: 0x222222, shininess: 20,
-    flatShading: true, transparent: true, opacity: 0.92
-  });
+  // Source image texture for roof draping
+  const sourceTexture = new THREE.Texture();
+  if (sourceImageUrl) {
+    const img = new window.Image();
+    img.onload = function() {
+      sourceTexture.image = img;
+      sourceTexture.minFilter = THREE.LinearFilter;
+      sourceTexture.magFilter = THREE.LinearFilter;
+      sourceTexture.needsUpdate = true;
+    };
+    img.src = sourceImageUrl;
+  }
+
+  // Materials: roof gets source image, walls get solid colour
   const roofMat = new THREE.MeshPhongMaterial({
-    color: 0xddccaa, specular: 0x111111, shininess: 10,
-    flatShading: true
+    map: sourceTexture, specular: 0x111111, shininess: 10,
   });
+  const wallMat = new THREE.MeshPhongMaterial({
+    color: 0xaa8866, specular: 0x222222, shininess: 20,
+    flatShading: true,
+  });
+  const edgeMat = new THREE.LineBasicMaterial({ color: 0x111111 });
   const treeMat = new THREE.MeshPhongMaterial({
     color: 0x44aa44, specular: 0x112211, shininess: 5,
     flatShading: false
@@ -722,8 +747,28 @@ function buildLOD1Scene(data, sourceImageUrl) {
       // Rotate so extrusion goes up (Y axis) instead of Z
       geo.rotateX(-Math.PI / 2);
 
-      const bldgMesh = new THREE.Mesh(geo, bldgMat);
+      // Rewrite UVs: map roof faces to source image pixel coords
+      const uvAttr = geo.attributes.uv;
+      const posAttr = geo.attributes.position;
+      for (let vi = 0; vi < posAttr.count; vi++) {
+        const y = posAttr.getY(vi);
+        if (Math.abs(y - h) < 0.5) {
+          const wx = posAttr.getX(vi);
+          const wz = posAttr.getZ(vi);
+          uvAttr.setXY(vi, (wx - offsetX) / PLANE_SIZE, (wz - offsetZ) / PLANE_SIZE);
+        }
+      }
+      uvAttr.needsUpdate = true;
+
+      // Multi-material: [caps, sides]
+      const bldgMesh = new THREE.Mesh(geo, [roofMat, wallMat]);
       bldgMesh.userData = { type: 'building', instance: inst };
+
+      // Edge outlines
+      const edges = new THREE.EdgesGeometry(geo, 15);
+      const edgeLines = new THREE.LineSegments(edges, edgeMat);
+      bldgMesh.add(edgeLines);
+
       lod1Group.add(bldgMesh);
       bldgCount++;
     }
@@ -829,6 +874,20 @@ function buildLOD1Scene(data, sourceImageUrl) {
     window._animateBuildingRise = false;
   }
 
+  // Camera auto-fit to LOD1 bounding box
+  const box = new THREE.Box3().setFromObject(lod1Group);
+  if (!box.isEmpty()) {
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.z, 1);
+    const dist = maxDim * 1.2;
+    const camPos = new THREE.Vector3(center.x + dist * 0.6, dist * 0.8, center.z + dist * 0.6);
+    lod1DefaultCam = { pos: [camPos.x, camPos.y, camPos.z], target: [center.x, center.y, center.z] };
+    camera.position.copy(camPos);
+    orbitControls.target.set(center.x, center.y, center.z);
+    orbitControls.update();
+  }
+
   return { buildings: bldgCount, trees: treeCount };
 }
 
@@ -894,9 +953,15 @@ const camHint = document.getElementById('cam-hint');
 const crosshair = document.getElementById('crosshair');
 
 function resetCamera() {
-  camera.position.set(...DEFAULT_CAM.pos);
-  camera.lookAt(new THREE.Vector3(...DEFAULT_CAM.target));
-  orbitControls.target.set(...DEFAULT_CAM.target);
+  if (lod1Active && lod1DefaultCam) {
+    camera.position.set(...lod1DefaultCam.pos);
+    camera.lookAt(new THREE.Vector3(...lod1DefaultCam.target));
+    orbitControls.target.set(...lod1DefaultCam.target);
+  } else {
+    camera.position.set(...DEFAULT_CAM.pos);
+    camera.lookAt(new THREE.Vector3(...DEFAULT_CAM.target));
+    orbitControls.target.set(...DEFAULT_CAM.target);
+  }
   orbitControls.update();
 }
 
@@ -1058,14 +1123,23 @@ renderer.domElement.addEventListener('mousemove', e => {
       const wp = hit.point;
       const info = getLOD1HeightAtPoint(wp.x, wp.z);
       if (info && info.height_m != null) {
-        let text = info.height_m.toFixed(1) + ' m';
+        const isRelative = info.source === 'relative';
+        const prefix = (info.source === 'inferred' || isRelative) ? '~' : '';
+        let text = prefix + info.height_m.toFixed(1) + ' m';
         if (info.uncertainty_m) text += ' ±' + info.uncertainty_m.toFixed(1);
-        if (info.confidence) text += ' [' + info.confidence + ']';
+        if (info.methods && info.methods.length > 0) {
+          text += ' (' + info.methods.join(' + ') + ')';
+        }
+        if (isRelative) text += ' — relative (shadow unreliable)';
+        else if (info.source === 'inferred') text += ' — estimated';
+        if (info.confidence === 'low' && !isRelative) text += ' [methods disagree]';
         tooltip.textContent = text;
-      } else if (info) {
-        tooltip.textContent = info.label;
+      } else if (info && info.label === 'building') {
+        tooltip.textContent = 'Height unavailable — no measurement possible';
+      } else if (info && info.label === 'tree') {
+        tooltip.textContent = 'Tree canopy';
       } else {
-        tooltip.textContent = 'ground';
+        tooltip.textContent = 'Ground level';
       }
       tooltip.style.left = (e.clientX + 16) + 'px';
       tooltip.style.top = (e.clientY - 10) + 'px';
@@ -1088,15 +1162,18 @@ renderer.domElement.addEventListener('mousemove', e => {
   const idx = py * w + px;
   if (idx >= 0 && idx < currentFloatData.length) {
     const val = currentFloatData[idx];
-    const unit = currentMeta.units === 'metres' ? 'm' : 'rel';
-    tooltip.textContent = val.toFixed(1) + ' ' + unit;
+    if (currentMeta.units === 'metres') {
+      tooltip.textContent = val.toFixed(1) + ' m';
+    } else {
+      tooltip.textContent = '~' + val.toFixed(1) + ' (relative, non-metric)';
+    }
     tooltip.style.left = (e.clientX + 16) + 'px';
     tooltip.style.top = (e.clientY - 10) + 'px';
     tooltip.style.display = 'block';
 
     if (measureActive) {
       document.getElementById('measure-val').textContent = val.toFixed(1);
-      document.getElementById('measure-unit').textContent = unit;
+      document.getElementById('measure-unit').textContent = currentMeta.units === 'metres' ? 'm' : '(relative)';
       document.getElementById('measure-coords').textContent = 'px (' + px + ', ' + py + ')';
     }
   }
@@ -1240,6 +1317,7 @@ function updateColorRamp() {
 document.getElementById('file-input').addEventListener('change', async () => {
   const file = document.getElementById('file-input').files[0];
   if (!file) return;
+  lastUploadedFile = file;
   const status = document.getElementById('status');
   status.textContent = 'Uploading…';
 
@@ -1399,6 +1477,158 @@ document.getElementById('file-input').addEventListener('change', async () => {
       }
     } else {
       structInfo.style.display = 'none';
+    }
+
+    // ── Auto-chain: LOD1 metric pipeline ──────────────────────────────────
+    // Run SAM segmentation + height estimation automatically after upload
+    const samStatus = meta.sam_status || 'loading';
+    if (samStatus === 'failed') {
+      status.textContent += ' | SAM unavailable — showing relative heightfield only.';
+    } else {
+      try {
+        // Wait for SAM if still loading
+        if (samStatus === 'loading') {
+          status.textContent = 'Waiting for SAM to load…';
+          let samReady = false;
+          for (let attempt = 0; attempt < 20; attempt++) {
+            await new Promise(r => setTimeout(r, 3000));
+            const hResp = await fetch('/health');
+            if (hResp.ok) {
+              const hData = await hResp.json();
+              if (hData.sam === 'ready') { samReady = true; break; }
+              if (hData.sam === 'failed') {
+                status.textContent += ' | SAM failed to load.';
+                break;
+              }
+            }
+            status.textContent = 'Waiting for SAM… (' + (attempt + 1) * 3 + 's)';
+          }
+          if (!samReady) {
+            status.textContent += ' | SAM not available — showing relative heightfield.';
+            throw new Error('SAM not ready');
+          }
+        }
+
+        status.textContent = 'Running SAM segmentation + height estimation… (~20s on CPU)';
+
+        const gsd = parseFloat(document.getElementById('gsd-slider').value) || 0.5;
+        const sunElev = parseFloat(document.getElementById('sun-elev-slider').value) || 45;
+        const samForm = new FormData();
+        samForm.append('file', lastUploadedFile);
+
+        const samResp = await fetch(
+          '/estimate-heights?gsd=' + gsd + '&sun_elevation=' + sunElev + '&sun_azimuth=180',
+          { method: 'POST', body: samForm }
+        );
+
+        if (!samResp.ok) {
+          const errJ = await samResp.json().catch(() => ({}));
+          throw new Error(errJ.detail || 'SAM returned ' + samResp.status);
+        }
+
+        const samData = await samResp.json();
+        console.log('[SAM auto-chain] Response:', samData);
+
+        if (lastSourceBlobUrl) URL.revokeObjectURL(lastSourceBlobUrl);
+        lastSourceBlobUrl = URL.createObjectURL(lastUploadedFile);
+        window._animateBuildingRise = true;
+
+        const lod1Result = buildLOD1Scene(samData, lastSourceBlobUrl);
+        lod1Instances = samData.instances;
+
+        // Update sun source label with full provenance
+        const sunInfo = samData.sun || {};
+        const srcLabels = {
+          'metadata': 'from product metadata',
+          'computed': 'computed (pysolar)',
+          'estimated': 'measured from shadows',
+          'user': 'estimated — user supplied',
+          'default': 'default (no source)',
+        };
+        const srcText = srcLabels[sunInfo.source] || sunInfo.source || 'unknown';
+        document.getElementById('sun-source-label').textContent = srcText;
+        if (sunInfo.elevation_deg) {
+          document.getElementById('sun-elev-slider').value = sunInfo.elevation_deg;
+          document.getElementById('sun-elev-val').textContent = sunInfo.elevation_deg.toFixed(0) + '°';
+        }
+        // Show cross-check status
+        if (sunInfo.cross_check) {
+          const cc = sunInfo.cross_check;
+          let ccText;
+          if (cc.note) {
+            ccText = cc.note;
+          } else if (cc.azimuth_delta_deg != null) {
+            ccText = cc.consistent
+              ? 'azimuth cross-check: consistent (Δ' + cc.azimuth_delta_deg + '°)'
+              : 'WARNING: azimuth Δ' + cc.azimuth_delta_deg + '°';
+          }
+          if (ccText) {
+            console.log('[Sun]', ccText);
+            const srcLabel = document.getElementById('sun-source-label');
+            srcLabel.textContent += ' · ' + ccText;
+          }
+        }
+
+        // Show honest coverage
+        const cov = samData.coverage || {};
+        const covEl = document.getElementById('coverage-display');
+        const measured = cov.directly_measured || 0;
+        const relative = cov.relative || 0;
+        const inferred = cov.inferred || 0;
+        const failed = cov.failed || 0;
+        const total = cov.total_buildings || 0;
+        const shadowR = cov.shadow_coherence_R;
+        const shadowOk = cov.shadow_reliable !== false;
+
+        let covText = '';
+        if (!shadowOk) {
+          covText = 'Shadow detection unreliable (R=' + (shadowR != null ? shadowR.toFixed(2) : '?') + ') — heights not metric · ' +
+                    relative + ' relative · ' + inferred + ' inferred · ' + failed + ' failed of ' + total;
+        } else {
+          covText = 'Measured: ' + measured + ' · Inferred: ' + inferred + ' · Failed: ' + failed + ' of ' + total + ' buildings';
+          if (shadowR != null) covText += ' · R=' + shadowR.toFixed(2);
+        }
+        covEl.textContent = covText;
+        if (!shadowOk) covEl.style.color = '#e65100';
+        else covEl.style.color = '';
+        document.getElementById('coverage-row').style.display = '';
+
+        // Show comparison toggle
+        document.getElementById('comparison-toggle-row').style.display = '';
+
+        // Stats
+        const sr = document.getElementById('stats-readout');
+        const hs = samData.height_stats || {};
+        if (!shadowOk) {
+          sr.innerHTML =
+            '<span class="sv" style="color:#e65100">⚠ Shadow R=' + (shadowR != null ? shadowR.toFixed(2) : '?') + '</span>' +
+            ' · <span class="sv">' + total + '</span> buildings' +
+            ' · <span class="sv">' + relative + '</span> relative' +
+            ' · <span class="sv">' + inferred + '</span> inferred' +
+            (hs.mean_m ? ' · mean <span class="sv">' + hs.mean_m.toFixed(1) + ' m</span> (non-metric)' : '') +
+            (samData.timing ? ' · <span class="sv">' + samData.timing.total + 's</span>' : '');
+        } else {
+          sr.innerHTML =
+            '<span class="sv">R=' + (shadowR != null ? shadowR.toFixed(2) : '?') + '</span>' +
+            ' · <span class="sv">' + total + '</span> buildings' +
+            ' · <span class="sv">' + measured + '</span> measured' +
+            ' · <span class="sv">' + inferred + '</span> inferred' +
+            (hs.mean_m ? ' · mean <span class="sv">' + hs.mean_m.toFixed(1) + ' m</span>' : '') +
+            (samData.timing ? ' · <span class="sv">' + samData.timing.total + 's</span>' : '');
+        }
+        sr.style.display = 'block';
+
+        status.textContent =
+          'LOD1: ' + lod1Result.buildings + ' buildings, ' + lod1Result.trees + ' trees' +
+          ' · Sun: ' + (sunInfo.elevation_deg || '?') + '° (' + (sunInfo.source || '?') + ')' +
+          ' · Measured: ' + measured + '/' + total;
+
+      } catch (samErr) {
+        console.warn('[SAM auto-chain] Failed:', samErr.message);
+        if (!status.textContent.includes('SAM')) {
+          status.textContent += ' | LOD1 unavailable: ' + samErr.message;
+        }
+      }
     }
 
   } catch (e) {
@@ -1602,84 +1832,18 @@ document.getElementById('gsd-slider').addEventListener('input', function() {
   document.getElementById('gsd-val').textContent = parseFloat(this.value).toFixed(2);
 });
 
-let lastUploadedFile = null;
-let lastSourceBlobUrl = null;
-
-// Keep track of the uploaded file for SAM pipeline
-const origFileInput = document.getElementById('file-input');
-origFileInput.addEventListener('change', function() {
-  if (this.files[0]) lastUploadedFile = this.files[0];
-});
-
-document.getElementById('btn-segment').addEventListener('click', async () => {
-  const file = lastUploadedFile || document.getElementById('file-input').files[0];
-  if (!file) {
-    document.getElementById('status').textContent = 'Upload an image first, then click Segment & Build 3D.';
-    return;
-  }
-
-  const status = document.getElementById('status');
-  status.textContent = 'Running SAM segmentation + height estimation… (this takes ~60s on CPU)';
-
-  // Show sun/gsd controls
-  document.getElementById('sun-row').style.display = '';
-  document.getElementById('gsd-row').style.display = '';
-
-  const gsd = parseFloat(document.getElementById('gsd-slider').value) || 0.5;
-  const sunElev = parseFloat(document.getElementById('sun-elev-slider').value) || 45;
-
-  const formData = new FormData();
-  formData.append('file', file);
-
-  try {
-    const resp = await fetch(
-      '/estimate-heights?gsd=' + gsd + '&sun_elevation=' + sunElev + '&sun_azimuth=180',
-      { method: 'POST', body: formData }
-    );
-    if (resp.status === 503) {
-      const err = await resp.json().catch(() => ({}));
-      status.textContent = err.detail || 'SAM still loading — try again shortly.';
-      return;
-    }
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => null);
-      status.textContent = (err && err.detail) ? err.detail : 'Error: ' + resp.status;
-      return;
-    }
-
-    const data = await resp.json();
-    console.log('[SAM] Response:', data);
-
-    // Create blob URL for source image texture
-    if (lastSourceBlobUrl) URL.revokeObjectURL(lastSourceBlobUrl);
-    lastSourceBlobUrl = URL.createObjectURL(file);
-
-    const result = buildLOD1Scene(data, lastSourceBlobUrl);
-
-    // Update stats
-    const sr = document.getElementById('stats-readout');
-    const cov = data.coverage || {};
-    const hs = data.height_stats || {};
-    sr.innerHTML =
-      '<span class="sv">' + (cov.total_buildings || 0) + '</span> buildings' +
-      ' · <span class="sv">' + (cov.coverage_pct || 0) + '%</span> with heights' +
-      (hs.mean_m ? ' · mean <span class="sv">' + hs.mean_m.toFixed(1) + ' m</span>' : '') +
-      (data.timing ? ' · <span class="sv">' + data.timing.total + 's</span>' : '');
-    sr.style.display = 'block';
-
-    const sunInfo = data.sun || {};
-    status.textContent =
-      'LOD1: ' + result.buildings + ' buildings, ' + result.trees + ' trees' +
-      ' · Sun: ' + sunInfo.elevation_deg + '° elev, ' + sunInfo.source +
-      ' · Coverage: ' + (cov.coverage_pct || 0) + '%' +
-      (data.segmentation_time_s ? ' · SAM: ' + data.segmentation_time_s + 's' : '');
-
-    // Store instance data for height readout
-    lod1Instances = data.instances;
-
-  } catch (e) {
-    status.textContent = 'Segment error: ' + e.message;
-    console.error(e);
+// ─── Comparison toggle: relative heightfield vs LOD1 ────────────────────────
+document.getElementById('heightfield-toggle').addEventListener('change', function() {
+  if (this.checked) {
+    mesh.visible = true;
+    if (lod1Group) lod1Group.visible = false;
+    lod1Active = false;
+    document.getElementById('status').textContent = 'Showing relative relief (non-metric) — uncheck to return to LOD1.';
+  } else {
+    mesh.visible = false;
+    if (lod1Group) lod1Group.visible = true;
+    lod1Active = true;
+    document.getElementById('status').textContent = 'LOD1 metric view restored.';
   }
 });
 
@@ -1687,9 +1851,8 @@ document.getElementById('btn-segment').addEventListener('click', async () => {
 // Override the mousemove tooltip for LOD1 mode to show metric heights
 function getLOD1HeightAtPoint(worldX, worldZ) {
   if (!lod1Instances) return null;
-  // Convert world coords back to image pixels
-  const imgX = (worldX + PLANE_SIZE / 2) / PLANE_SIZE * 512;
-  const imgY = (worldZ + PLANE_SIZE / 2) / PLANE_SIZE * 512;
+  const imgX = (worldX + PLANE_SIZE / 2) / PLANE_SIZE * lod1ImageW;
+  const imgY = (worldZ + PLANE_SIZE / 2) / PLANE_SIZE * lod1ImageH;
 
   for (const inst of lod1Instances) {
     if (inst.label !== 'building' || !inst.bbox) continue;
@@ -1700,10 +1863,11 @@ function getLOD1HeightAtPoint(worldX, worldZ) {
         confidence: inst.height_confidence,
         uncertainty_m: inst.height_uncertainty_m,
         label: inst.label,
+        methods: inst.height_methods || [],
+        source: inst.height_source || null,
       };
     }
   }
-  // Check trees
   for (const inst of lod1Instances) {
     if (inst.label !== 'tree' || !inst.bbox) continue;
     const [bx, by, bw, bh] = inst.bbox;
