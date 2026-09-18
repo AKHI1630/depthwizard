@@ -2,21 +2,25 @@
 
 Pipeline:
 1. Adaptive SLIC superpixels on the RGB image
-2. Classify each region using shape + color + texture features:
+2. Classify each region using SHAPE AND CONTEXT ONLY:
    BUILDING, ROAD, VEGETATION, GROUND
+   (brightness and depth are NOT used for classification)
 3. Merge adjacent building superpixels into unified rooftops
 4. Assign heights with outlier clamping:
    - BUILDING: constant height = clipped median depth (flat roofs, sharp walls)
    - ROAD + GROUND: common base elevation (flat terrain)
    - VEGETATION: median height, mild roughness retained
-5. Compose final heightmap + assert flat-roof invariant
+5. Height sanity clamping: buildings outside [base+2, base+100] demoted to GROUND
+6. Compose final heightmap + assert flat-roof invariant
 """
 import logging
 import time
 
+import cv2
 import numpy as np
 from PIL import Image
 from scipy import ndimage
+from skimage.morphology import skeletonize
 from skimage.segmentation import slic
 
 logger = logging.getLogger(__name__)
@@ -28,8 +32,13 @@ GROUND = 3
 CLASS_NAMES = {BUILDING: "BUILDING", ROAD: "ROAD", VEGETATION: "VEGETATION", GROUND: "GROUND"}
 
 
-def _compute_shape_features(segments: np.ndarray, n_segs: int) -> tuple[np.ndarray, np.ndarray]:
-    """Compute solidity and elongation per superpixel using vectorized bounding boxes."""
+def _compute_shape_features(
+    segments: np.ndarray, n_segs: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute shape features per superpixel using vectorized bounding boxes.
+
+    Returns (solidity, elongation, border_count, span_fraction).
+    """
     h, w = segments.shape
     seg_flat = segments.ravel()
     areas = np.bincount(seg_flat, minlength=n_segs)
@@ -57,7 +66,16 @@ def _compute_shape_features(segments: np.ndarray, n_segs: int) -> tuple[np.ndarr
     long = np.maximum(extent_y, extent_x)
     elongation = (long / np.maximum(short, 1)).astype(np.float32)
 
-    return solidity, elongation
+    border_count = (
+        (min_y == 0).astype(np.int32)
+        + (max_y == h - 1).astype(np.int32)
+        + (min_x == 0).astype(np.int32)
+        + (max_x == w - 1).astype(np.int32)
+    )
+
+    span_fraction = np.maximum(extent_x / w, extent_y / h).astype(np.float32)
+
+    return solidity, elongation, border_count, span_fraction
 
 
 def _classify_vectorized(
@@ -65,7 +83,12 @@ def _classify_vectorized(
     segments: np.ndarray,
     depth: np.ndarray,
 ) -> np.ndarray:
-    """Classify superpixels using color, texture, shape, and depth features."""
+    """Classify superpixels using SHAPE AND CONTEXT ONLY.
+
+    Brightness and depth are NOT used for class decisions.
+    Depth is only used later for height assignment.
+    """
+    h, w = segments.shape
     n_segs = segments.max() + 1
     seg_ids = np.arange(n_segs)
     classes = np.full(n_segs, GROUND, dtype=np.int32)
@@ -78,45 +101,44 @@ def _classify_vectorized(
     mean_r = np.array(ndimage.mean(r, segments, seg_ids))
     mean_g = np.array(ndimage.mean(g, segments, seg_ids))
     mean_b = np.array(ndimage.mean(b, segments, seg_ids))
-    mean_brightness = (mean_r + mean_g + mean_b) / 3.0
     texture_std = np.array(ndimage.standard_deviation(gray, segments, seg_ids))
 
     rgb_sum = mean_r + mean_g + mean_b
     rgb_sum[rgb_sum == 0] = 1.0
     green_excess = (2 * mean_g - mean_r - mean_b) / rgb_sum
 
-    mean_depth = np.array(ndimage.mean(depth, segments, seg_ids))
-    depth_std = np.array(ndimage.standard_deviation(depth, segments, seg_ids))
-
     seg_areas = np.bincount(segments.ravel(), minlength=n_segs).astype(np.float32)
+    min_bldg_area = 200.0 * (w * h) / (1024.0 * 1024.0)
 
-    solidity, elongation = _compute_shape_features(segments, n_segs)
+    solidity, elongation, border_count, span_fraction = _compute_shape_features(segments, n_segs)
 
-    # --- Vegetation: green excess + high texture (catches dark tree crowns) ---
+    # --- Vegetation: green excess + texture (color IS valid for vegetation) ---
     is_veg = (
         (green_excess > 0.05) & (texture_std > 10)
     ) | (
         (green_excess > 0.12)
     )
 
-    # --- Building: compact shape + moderate-high brightness + low internal texture ---
-    is_bldg = (
+    # --- Road rejection: SHAPE AND CONTEXT ONLY (applied BEFORE building check) ---
+    is_road = (
         (~is_veg)
-        & (solidity > 0.55)
-        & (elongation < 4.0)
-        & (texture_std < 40)
-        & (depth_std < mean_depth * 0.3 + 1.0)
-        & (mean_brightness > 100)
+        & (
+            (elongation > 4.0)
+            | ((border_count >= 2) & (elongation > 2.0))
+            | (span_fraction > 0.6)
+            | ((elongation > 3.0) & (solidity < 0.4))
+        )
     )
 
-    # --- Road: elongated or low-texture dark regions ---
-    is_road = (
-        (~is_veg) & (~is_bldg)
-        & (
-            (elongation > 3.0)
-            | ((mean_brightness < 110) & (texture_std < 25))
-            | ((solidity < 0.45) & (texture_std < 20))
-        )
+    # --- Building confirmation: ALL required, NO brightness, NO depth ---
+    is_bldg = (
+        (~is_veg)
+        & (~is_road)
+        & (solidity > 0.65)
+        & (elongation < 4.0)
+        & (seg_areas >= min_bldg_area)
+        & (border_count < 2)
+        & (texture_std < 40)
     )
 
     classes[is_veg] = VEGETATION
@@ -180,10 +202,98 @@ def _merge_adjacent_buildings(
     return merged
 
 
+def extract_building_footprints(
+    image_pil: Image.Image,
+    depth: np.ndarray,
+    min_area: int = 500,
+    max_aspect: float = 6.0,
+    min_solidity: float = 0.4,
+) -> tuple[list[dict], np.ndarray]:
+    """Extract building footprints using Canny edges + morphological closing.
+
+    Returns (footprints_list, outline_mask).
+    """
+    h, w = depth.shape
+    gray = np.array(
+        image_pil.convert("L").resize((w, h), Image.BILINEAR),
+        dtype=np.uint8,
+    )
+
+    median_val = int(np.median(gray))
+    low_thresh = max(0, int(0.5 * median_val))
+    high_thresh = min(255, int(1.5 * median_val))
+    edges = cv2.Canny(gray, low_thresh, high_thresh)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+
+    # Flood fill from corners to find enclosed regions
+    filled = closed.copy()
+    flood_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
+    for seed in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
+        if filled[seed[1], seed[0]] == 0:
+            cv2.floodFill(filled, flood_mask, seed, 255)
+    filled_inv = cv2.bitwise_not(filled)
+    regions = closed | filled_inv
+
+    n_labels, labels = cv2.connectedComponents(regions)
+    outline_mask = np.zeros((h, w), dtype=np.uint8)
+    footprints = []
+
+    for label_id in range(1, n_labels):
+        component_mask = (labels == label_id).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+
+        cnt = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(cnt)
+        if area < min_area:
+            continue
+
+        rect = cv2.minAreaRect(cnt)
+        (_, (rw, rh), _) = rect
+        if min(rw, rh) < 1:
+            continue
+        aspect = max(rw, rh) / min(rw, rh)
+        if aspect > max_aspect:
+            continue
+
+        hull = cv2.convexHull(cnt)
+        hull_area = cv2.contourArea(hull)
+        solidity = area / hull_area if hull_area > 0 else 0
+        if solidity < min_solidity:
+            continue
+
+        epsilon = 0.02 * cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, epsilon, True)
+
+        M = cv2.moments(cnt)
+        cx = int(M["m10"] / M["m00"]) if M["m00"] > 0 else 0
+        cy = int(M["m01"] / M["m00"]) if M["m00"] > 0 else 0
+
+        mean_height = float(np.median(depth[component_mask > 0]))
+
+        cv2.drawContours(outline_mask, [approx], -1, 255, 2)
+
+        footprints.append({
+            "polygon": approx.reshape(-1, 2).tolist(),
+            "area": float(area),
+            "centroid": [cx, cy],
+            "mean_height": round(mean_height, 2),
+            "solidity": round(solidity, 3),
+            "aspect_ratio": round(aspect, 2),
+        })
+
+    logger.info("Footprint extraction: %d buildings from %d components", len(footprints), n_labels - 1)
+    return footprints, outline_mask
+
+
 def structure_aware_dsm(
     depth: np.ndarray,
     image_pil: Image.Image,
     n_segments: int | None = None,
+    footprint_mode: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Apply structural priors to a raw depth map.
 
@@ -271,10 +381,22 @@ def structure_aware_dsm(
         clipped = all_vals[(all_vals >= p10) & (all_vals <= p90)]
         rooftop_heights[root] = float(np.median(clipped)) if len(clipped) > 0 else float(np.median(all_vals))
 
+    # Height sanity clamping: building must be in [base+2, base+100]
+    demoted_roots = set()
+    for root, roof_h in list(rooftop_heights.items()):
+        if roof_h < base_height + 2.0 or roof_h > base_height + 100.0:
+            demoted_roots.add(root)
+            del rooftop_heights[root]
+    if demoted_roots:
+        for seg_id in range(actual_segs):
+            if classes[seg_id] == BUILDING and merged_labels[seg_id] in demoted_roots:
+                classes[seg_id] = GROUND
+        class_map = classes[segments]
+        logger.info("Height clamping: demoted %d rooftop groups to GROUND", len(demoted_roots))
+
     unique_buildings = len(rooftop_heights)
     logger.info("Merged %d building superpixels into %d rooftops", old_bldg_count, unique_buildings)
 
-    bldg_stds = []
     for seg_id in range(n_segs):
         cls = classes[seg_id]
         mask = segments == seg_id
@@ -337,6 +459,15 @@ def structure_aware_dsm(
     )
     stats["separation"] = round(float(separation), 2)
     stats["pearson_r"] = round(float(corr), 4)
+
+    if footprint_mode:
+        t_fp = time.perf_counter()
+        footprints, outline_mask = extract_building_footprints(image_pil, depth)
+        t_fp_done = time.perf_counter()
+        stats["footprints"] = footprints
+        stats["footprint_count"] = len(footprints)
+        stats["_outline_mask"] = outline_mask
+        logger.info("Footprint extraction: %d buildings in %.2f s", len(footprints), t_fp_done - t_fp)
 
     elapsed = time.perf_counter() - t0
     logger.info(

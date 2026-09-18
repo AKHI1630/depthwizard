@@ -166,6 +166,7 @@ async def upload(
     estimator: Literal["depth_anything", "midas", "synthetic"] = Query(default="depth_anything"),
     detrend: bool = Query(default=True),
     structure: bool = Query(default=False),
+    footprints: bool = Query(default=False),
 ) -> Response:
     global _last_image_bytes
     image_bytes = await file.read()
@@ -212,10 +213,14 @@ async def upload(
         import io as _io
         t_struct = _time.perf_counter()
         img_pil = PILImage.open(_io.BytesIO(image_bytes)).convert("RGB")
-        structured, class_map, stats = structure_aware_dsm(height_array, img_pil)
+        structured, class_map, stats = structure_aware_dsm(
+            height_array, img_pil, footprint_mode=footprints,
+        )
         timing["structure_dsm"] = round(_time.perf_counter() - t_struct, 2)
         height_array = structured
         _last_prediction["class_map"] = class_map
+        if "_outline_mask" in stats:
+            _last_prediction["outline_mask"] = stats.pop("_outline_mask")
         _last_prediction["structure_stats"] = stats
 
     timing["total"] = round(_time.perf_counter() - t_total, 2)
@@ -225,7 +230,10 @@ async def upload(
     meta_dict["provenance"] = "relative"
     meta_dict["timing"] = timing
     if structure:
-        meta_dict["structure_stats"] = _last_prediction.get("structure_stats", {})
+        ss = _last_prediction.get("structure_stats", {})
+        meta_dict["structure_stats"] = {
+            k: v for k, v in ss.items() if k != "footprints"
+        }
     if warning:
         meta_dict["warning"] = warning
         logger.warning("Fallback active: %s", warning)
@@ -296,6 +304,77 @@ async def structure_map() -> Response:
         rgba[mask] = color
 
     img = PILImage.fromarray(rgba, "RGBA")
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+    return Response(content=buf.getvalue(), media_type="image/png")
+
+
+@app.get("/footprint-overlay")
+async def footprint_overlay() -> Response:
+    """Return building footprint outlines as a transparent PNG."""
+    import io as _io
+    from PIL import Image as PILImage
+
+    if "outline_mask" not in _last_prediction:
+        raise HTTPException(400, "No footprints — upload with ?structure=true&footprints=true first.")
+
+    mask = _last_prediction["outline_mask"]
+    h, w = mask.shape
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    rgba[mask > 0] = (255, 240, 200, 220)
+
+    img = PILImage.fromarray(rgba, "RGBA")
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+    return Response(content=buf.getvalue(), media_type="image/png")
+
+
+@app.get("/footprints")
+async def footprints_json() -> JSONResponse:
+    """Return extracted building footprints as JSON."""
+    stats = _last_prediction.get("structure_stats", {})
+    if "footprints" not in stats:
+        raise HTTPException(400, "No footprints — upload with ?structure=true&footprints=true first.")
+    return JSONResponse(content={
+        "count": stats.get("footprint_count", 0),
+        "footprints": stats["footprints"],
+    })
+
+
+@app.get("/diagnostic-map")
+async def diagnostic_map() -> Response:
+    """Return classification diagnostic as a color-coded PNG with legend."""
+    import io as _io
+    from PIL import Image as PILImage, ImageDraw
+
+    if "class_map" not in _last_prediction:
+        raise HTTPException(400, "No structure map — upload with ?structure=true first.")
+
+    cmap = _last_prediction["class_map"]
+    h, w = cmap.shape
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    colors = {
+        0: (220, 50, 50, 200),
+        1: (140, 140, 140, 200),
+        2: (50, 180, 50, 200),
+        3: (160, 120, 80, 200),
+    }
+    names = {0: "BUILDING", 1: "ROAD", 2: "VEGETATION", 3: "GROUND"}
+    for cls, color in colors.items():
+        mask = cmap == cls
+        rgba[mask] = color
+
+    img = PILImage.fromarray(rgba, "RGBA")
+    draw = ImageDraw.Draw(img)
+    y_pos = 8
+    for cls in (0, 1, 2, 3):
+        count = int((cmap == cls).sum())
+        pct = count / (h * w) * 100
+        r, g, b, _ = colors[cls]
+        draw.rectangle([6, y_pos, 18, y_pos + 12], fill=(r, g, b, 255))
+        draw.text((22, y_pos), f"{names[cls]}: {pct:.1f}%", fill=(255, 255, 255, 255))
+        y_pos += 16
+
     buf = _io.BytesIO()
     img.save(buf, format="PNG")
     return Response(content=buf.getvalue(), media_type="image/png")

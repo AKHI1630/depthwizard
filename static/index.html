@@ -6,111 +6,195 @@
 <title>DepthWizard — 3D Flythrough</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #0a0a12; color: #e0e0e0; font-family: Arial, sans-serif; overflow: hidden; }
+  body { background: #0d1117; color: #c8d8e8; font-family: system-ui, -apple-system, sans-serif; overflow: hidden; font-size: 13px; }
   #canvas-container { width: 100vw; height: 100vh; }
 
-  /* ── Main control panel ──────────────────────────────────────────────── */
-  .panel {
-    position: fixed; z-index: 10;
-    background: rgba(10,10,20,0.88); border: 1px solid #333;
-    border-radius: 8px; padding: 14px 18px;
-    backdrop-filter: blur(6px);
-    font-size: 14px;
+  /* ── Right panel ─────────────────────────────────────────────────────── */
+  #panel {
+    position: fixed; top: 0; right: 0; z-index: 10;
+    width: 320px; height: 100vh;
+    background: rgba(13,17,23,0.94);
+    border-left: 1px solid rgba(126,200,227,0.12);
+    overflow-y: auto; overflow-x: hidden;
+    transform: translateX(0);
+    transition: transform 0.3s ease;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
   }
-  #ui { top: 16px; left: 16px; min-width: 240px; }
-  #ui h1 { font-size: 17px; font-weight: bold; color: #7ec8e3; margin-bottom: 12px; letter-spacing: 0.05em; }
-  label { display: block; font-size: 13px; color: #bbb; margin-bottom: 3px; }
-  input[type=range] { width: 100%; accent-color: #7ec8e3; }
-  .val { font-size: 13px; color: #7ec8e3; float: right; }
-  .row { margin-bottom: 12px; }
+  #panel.collapsed { transform: translateX(320px); }
+  #panel::-webkit-scrollbar { width: 4px; }
+  #panel::-webkit-scrollbar-track { background: transparent; }
+  #panel::-webkit-scrollbar-thumb { background: rgba(126,200,227,0.2); border-radius: 2px; }
+
+  #panel-toggle {
+    position: fixed; top: 50%; right: 320px; z-index: 11;
+    transform: translateY(-50%);
+    width: 22px; height: 44px;
+    background: rgba(13,17,23,0.92);
+    border: 1px solid rgba(126,200,227,0.15);
+    border-right: none;
+    border-radius: 5px 0 0 5px;
+    color: #6a7a8a; font-size: 13px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: right 0.3s ease, background 0.2s;
+  }
+  #panel-toggle:hover { background: rgba(26,35,50,0.95); color: #c8d8e8; }
+  #panel-toggle.shifted { right: 0; }
+
+  .panel-header {
+    padding: 16px 16px 12px;
+    border-bottom: 1px solid rgba(126,200,227,0.08);
+  }
+  .panel-header h1 { font-size: 15px; font-weight: 600; color: #e0e8f0; letter-spacing: 0.04em; }
+  .panel-header .subtitle { font-size: 10px; color: #5a6a7a; letter-spacing: 0.06em; margin-top: 2px; }
+
+  /* ── Sections ────────────────────────────────────────────────────────── */
+  .section { border-bottom: 1px solid rgba(126,200,227,0.06); }
+  .section-header {
+    display: flex; align-items: center; gap: 6px;
+    padding: 10px 16px;
+    font-size: 10px; font-weight: 600; letter-spacing: 0.1em;
+    color: #7ec8e3; text-transform: uppercase;
+    cursor: pointer; user-select: none;
+    transition: background 0.15s;
+  }
+  .section-header:hover { background: rgba(126,200,227,0.04); }
+  .section-header .chev {
+    font-size: 9px; transition: transform 0.2s;
+    display: inline-block; width: 10px; text-align: center;
+  }
+  .section.collapsed .chev { transform: rotate(-90deg); }
+  .section-body { padding: 4px 16px 12px; }
+  .section.collapsed .section-body { display: none; }
+
+  /* ── Form elements ───────────────────────────────────────────────────── */
+  .row { margin-bottom: 10px; }
+  label { display: block; font-size: 11px; color: #6a7a8a; margin-bottom: 3px; }
+  .val { font-size: 12px; color: #7ec8e3; float: right; font-family: Consolas, Monaco, monospace; }
   select, button {
-    width: 100%; background: #1a1a2e; color: #e0e0e0;
-    border: 1px solid #444; border-radius: 4px; padding: 5px 8px;
-    font-size: 13px; cursor: pointer;
+    width: 100%; background: #161b22; color: #c8d8e8;
+    border: 1px solid rgba(126,200,227,0.15); border-radius: 4px;
+    padding: 6px 8px; font-size: 12px; cursor: pointer; font-family: inherit;
   }
-  button { background: #1e3a5f; border-color: #7ec8e3; color: #7ec8e3; transition: background 0.2s; }
-  button:hover { background: #2a5080; }
+  select:focus, button:focus { outline: none; border-color: rgba(126,200,227,0.35); }
+  button { background: #1a2332; color: #c8d8e8; transition: background 0.15s; }
+  button:hover { background: #243040; }
+  button.active { background: #3a2a1a; color: #f4a261; border-color: rgba(244,162,97,0.4); }
+  input[type=range] { width: 100%; accent-color: #7ec8e3; }
+  .check-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .check-row input[type=checkbox] { accent-color: #7ec8e3; width: 14px; height: 14px; flex-shrink: 0; }
+  .check-row label { margin: 0; font-size: 12px; cursor: pointer; }
   .btn-row { display: flex; gap: 6px; }
   .btn-row button { flex: 1; }
-  #file-btn {
-    display: inline-block; cursor: pointer; background: #1e3a5f;
-    border: 1px solid #7ec8e3; border-radius: 5px; padding: 6px 12px;
-    font-size: 13px; color: #7ec8e3; width: 100%; text-align: center;
-    transition: background 0.2s;
-  }
-  #file-btn:hover { background: #2a5080; }
-  #file-input { display: none; }
-  #status { font-size: 12px; color: #999; margin-top: 8px; min-height: 16px; }
-  #warning { display: none; font-size: 12px; color: #f4a261; margin-top: 6px; }
 
-  /* ── Provenance badge ────────────────────────────────────────────────── */
+  .upload-btn {
+    display: block; cursor: pointer; background: #1a2332;
+    border: 1px solid rgba(126,200,227,0.2); border-radius: 4px;
+    padding: 7px 10px; font-size: 12px; color: #6a7a8a;
+    text-align: center; transition: all 0.15s; width: 100%;
+  }
+  .upload-btn:hover { background: #243040; color: #c8d8e8; }
+  .upload-btn.accent { border-color: rgba(126,200,227,0.3); color: #7ec8e3; }
+  .upload-btn.green  { border-color: rgba(74,201,126,0.3);  color: #4ac97e; }
+  .upload-btn.purple { border-color: rgba(196,126,227,0.3); color: #c47ee3; }
+
+  #status {
+    padding: 10px 16px; font-size: 11px; color: #5a6a7a;
+    border-top: 1px solid rgba(126,200,227,0.06); min-height: 32px;
+  }
+  #warning { display: none; padding: 8px 16px; font-size: 11px; color: #f4a261; background: rgba(244,162,97,0.06); }
+  #structure-info { display: none; padding: 4px 0; font-size: 11px; color: #f4a261; }
+
+  /* ── Badges ──────────────────────────────────────────────────────────── */
   .badge {
-    display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px;
-    font-weight: bold; letter-spacing: 0.03em; margin-top: 4px;
+    display: inline-block; font-size: 10px; padding: 2px 8px; border-radius: 3px;
+    font-weight: 600; letter-spacing: 0.04em; font-family: Consolas, Monaco, monospace;
   }
-  .badge-relative  { background: #3a2a1a; color: #f4a261; border: 1px solid #f4a261; }
-  .badge-geotiff   { background: #1a3a2a; color: #4ac97e; border: 1px solid #4ac97e; }
-  .badge-calibrated { background: #1a2a3a; color: #7ec8e3; border: 1px solid #7ec8e3; }
+  .badge-relative  { background: rgba(244,162,97,0.12);  color: #f4a261; border: 1px solid rgba(244,162,97,0.3); }
+  .badge-geotiff   { background: rgba(74,201,126,0.12);  color: #4ac97e; border: 1px solid rgba(74,201,126,0.3); }
+  .badge-calibrated { background: rgba(126,200,227,0.12); color: #7ec8e3; border: 1px solid rgba(126,200,227,0.3); }
 
-  /* ── Info panel (bottom-left) ────────────────────────────────────────── */
-  #info-panel {
+  /* ── Floating stats (bottom-left) ────────────────────────────────────── */
+  #stats-readout {
     position: fixed; bottom: 16px; left: 16px; z-index: 10;
-    background: rgba(10,10,20,0.88); border: 1px solid #333;
-    border-radius: 8px; padding: 10px 14px;
-    backdrop-filter: blur(6px); font-size: 13px; color: #bbb;
-    min-width: 200px;
+    background: rgba(13,17,23,0.88); border: 1px solid rgba(126,200,227,0.1);
+    border-radius: 4px; padding: 8px 12px;
+    font-family: Consolas, Monaco, monospace; font-size: 11px; color: #6a7a8a;
+    pointer-events: none; display: none; line-height: 1.6;
+    backdrop-filter: blur(6px);
   }
-  #info-panel .label { color: #7ec8e3; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
-  #info-panel .val-big { font-size: 22px; color: #fff; font-weight: bold; }
-  #info-panel .val-unit { font-size: 13px; color: #888; }
+  #stats-readout .sv { color: #c8d8e8; }
 
-  /* ── Cross-section overlay ───────────────────────────────────────────── */
+  /* ── Color ramp (bottom-right) ───────────────────────────────────────── */
+  #color-ramp {
+    position: fixed; bottom: 16px; right: 336px; z-index: 10;
+    display: none; flex-direction: column; align-items: center; gap: 2px;
+    transition: right 0.3s ease;
+  }
+  #color-ramp.shifted { right: 16px; }
+  #color-ramp canvas { border: 1px solid rgba(126,200,227,0.12); border-radius: 2px; }
+  .ramp-label { font-family: Consolas, Monaco, monospace; font-size: 10px; color: #6a7a8a; }
+
+  /* ── Tooltip ─────────────────────────────────────────────────────────── */
+  #height-tooltip {
+    position: fixed; z-index: 20;
+    background: rgba(13,17,23,0.92); border: 1px solid rgba(126,200,227,0.2);
+    border-radius: 3px; padding: 2px 7px;
+    font-family: Consolas, Monaco, monospace; font-size: 11px; color: #c8d8e8;
+    pointer-events: none; display: none; white-space: nowrap;
+  }
+
+  /* ── Measure info ────────────────────────────────────────────────────── */
+  #info-panel {
+    position: fixed; bottom: 70px; left: 16px; z-index: 10;
+    background: rgba(13,17,23,0.9); border: 1px solid rgba(126,200,227,0.12);
+    border-radius: 5px; padding: 10px 14px; font-size: 12px; color: #6a7a8a;
+    min-width: 170px; display: none; backdrop-filter: blur(6px);
+  }
+  #info-panel .label { color: #7ec8e3; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+  #info-panel .val-big { font-size: 20px; color: #e0e8f0; font-weight: 600; font-family: Consolas, Monaco, monospace; }
+  #info-panel .val-unit { font-size: 12px; color: #5a6a7a; }
+
+  /* ── Cross-section ───────────────────────────────────────────────────── */
   #profile-panel {
-    position: fixed; bottom: 16px; right: 16px; z-index: 10;
-    background: rgba(10,10,20,0.92); border: 1px solid #333;
-    border-radius: 8px; padding: 10px; display: none;
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 10;
+    background: rgba(13,17,23,0.94); border: 1px solid rgba(126,200,227,0.12);
+    border-radius: 6px; padding: 10px; display: none; backdrop-filter: blur(6px);
   }
-  #profile-canvas { background: #0e0e1a; border-radius: 4px; }
+  #profile-canvas { background: #0d1117; border-radius: 3px; }
 
-  /* ── Validation panel ────────────────────────────────────────────────── */
+  /* ── Validation ──────────────────────────────────────────────────────── */
   #validate-panel {
-    position: fixed; top: 16px; right: 16px; z-index: 10;
-    background: rgba(10,10,20,0.92); border: 1px solid #333;
-    border-radius: 8px; padding: 14px; display: none;
-    max-width: 440px;
+    position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 15;
+    background: rgba(13,17,23,0.96); border: 1px solid rgba(126,200,227,0.15);
+    border-radius: 8px; padding: 16px; display: none; max-width: 460px;
+    backdrop-filter: blur(8px);
   }
-  #validate-panel h2 { font-size: 15px; color: #7ec8e3; margin-bottom: 10px; }
-  .stats-grid {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px;
-    font-size: 13px; margin-bottom: 10px;
-  }
-  .stats-grid .lbl { color: #888; }
-  .stats-grid .val { color: #fff; font-weight: bold; text-align: right; }
-  #validate-panel canvas { background: #0e0e1a; border-radius: 4px; margin-top: 6px; }
+  #validate-panel h2 { font-size: 14px; color: #c8d8e8; font-weight: 600; margin-bottom: 12px; }
+  .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; font-size: 12px; margin-bottom: 10px; }
+  .stats-grid .lbl { color: #5a6a7a; }
+  .stats-grid .val { color: #c8d8e8; font-weight: 600; text-align: right; font-family: Consolas, Monaco, monospace; }
+  #validate-panel canvas { background: #0d1117; border-radius: 3px; margin-top: 6px; }
   #validate-close {
-    position: absolute; top: 8px; right: 10px; background: none; border: none;
-    color: #888; font-size: 18px; cursor: pointer; width: auto; padding: 2px 6px;
+    position: absolute; top: 10px; right: 12px; background: none; border: none;
+    color: #5a6a7a; font-size: 18px; cursor: pointer; width: auto; padding: 2px 6px;
   }
-  #validate-close:hover { color: #fff; }
+  #validate-close:hover { color: #c8d8e8; }
 
-  /* ── Crosshair ───────────────────────────────────────────────────────── */
+  /* ── Crosshair / hint ────────────────────────────────────────────────── */
   #crosshair {
     position: fixed; top: 50%; left: 50%; z-index: 20;
     width: 24px; height: 24px; margin: -12px 0 0 -12px;
     pointer-events: none; display: none;
   }
-  #crosshair::before, #crosshair::after {
-    content: ''; position: absolute; background: rgba(255,255,255,0.6);
-  }
-  #crosshair::before { width: 2px; height: 100%; left: 50%; transform: translateX(-50%); }
-  #crosshair::after  { height: 2px; width: 100%; top: 50%; transform: translateY(-50%); }
-
-  /* ── Camera hint ─────────────────────────────────────────────────────── */
+  #crosshair::before, #crosshair::after { content: ''; position: absolute; background: rgba(200,216,232,0.45); }
+  #crosshair::before { width: 1px; height: 100%; left: 50%; transform: translateX(-50%); }
+  #crosshair::after  { height: 1px; width: 100%; top: 50%; transform: translateY(-50%); }
   #cam-hint {
-    position: fixed; bottom: 50px; left: 50%; transform: translateX(-50%);
-    z-index: 15; font-size: 13px; color: #7ec8e3; background: rgba(10,10,20,0.8);
-    padding: 6px 14px; border-radius: 6px; display: none;
-    pointer-events: none; white-space: nowrap;
+    position: fixed; bottom: 50px; left: 50%; transform: translateX(-50%); z-index: 15;
+    font-size: 12px; color: #8a9ab0; background: rgba(13,17,23,0.85);
+    padding: 6px 14px; border-radius: 4px; display: none;
+    pointer-events: none; white-space: nowrap; border: 1px solid rgba(126,200,227,0.1);
   }
 </style>
 </head>
@@ -119,100 +203,152 @@
 <div id="crosshair"></div>
 <div id="cam-hint"></div>
 
-<!-- ── Main UI ──────────────────────────────────────────────────────────── -->
-<div id="ui" class="panel">
-  <h1>DepthWizard</h1>
-  <div class="row">
-    <label>Estimator</label>
-    <select id="estimator-select">
-      <option value="depth_anything" selected>Depth Anything V2</option>
-      <option value="midas">MiDaS Small</option>
-      <option value="synthetic">Synthetic (debug)</option>
-    </select>
+<!-- ── Panel toggle ────────────────────────────────────────────────────── -->
+<button id="panel-toggle" title="Toggle panel">›</button>
+
+<!-- ── Right panel ─────────────────────────────────────────────────────── -->
+<div id="panel">
+  <div class="panel-header">
+    <h1>DepthWizard</h1>
+    <div class="subtitle">SIH 26175 · Single-View Height Estimation</div>
   </div>
-  <div class="row" style="display:flex;align-items:center;gap:8px;">
-    <input type="checkbox" id="detrend-check" checked style="accent-color:#7ec8e3;width:16px;height:16px;">
-    <label for="detrend-check" style="margin:0;cursor:pointer;">Remove low-freq ramp (detrend)</label>
+
+  <!-- SOURCE -->
+  <div class="section">
+    <div class="section-header"><span class="chev">▾</span>SOURCE</div>
+    <div class="section-body">
+      <div class="row">
+        <label>Estimator</label>
+        <select id="estimator-select">
+          <option value="depth_anything" selected>Depth Anything V2</option>
+          <option value="midas">MiDaS Small</option>
+          <option value="synthetic">Synthetic (debug)</option>
+        </select>
+      </div>
+      <div class="check-row">
+        <input type="checkbox" id="detrend-check" checked>
+        <label for="detrend-check">Remove low-freq ramp (detrend)</label>
+      </div>
+      <div class="check-row">
+        <input type="checkbox" id="structure-check">
+        <label for="structure-check">Structure-aware DSM</label>
+      </div>
+      <div class="check-row">
+        <input type="checkbox" id="footprint-check" disabled>
+        <label for="footprint-check">Extract building footprints</label>
+      </div>
+      <div class="row">
+        <label>Upload Image</label>
+        <div class="upload-btn accent" onclick="document.getElementById('file-input').click()">Choose file…</div>
+        <input type="file" id="file-input" accept="image/*,.tif,.tiff" style="display:none">
+      </div>
+    </div>
   </div>
-  <div class="row" style="display:flex;align-items:center;gap:8px;">
-    <input type="checkbox" id="structure-check" style="accent-color:#f4a261;width:16px;height:16px;">
-    <label for="structure-check" style="margin:0;cursor:pointer;">Structure-aware DSM</label>
+
+  <!-- DISPLAY -->
+  <div class="section">
+    <div class="section-header"><span class="chev">▾</span>DISPLAY</div>
+    <div class="section-body">
+      <div class="row">
+        <label>Vertical Exaggeration <span class="val" id="ve-value">2.0×</span></label>
+        <input type="range" id="ve-slider" min="0.1" max="10" step="0.1" value="2.0">
+      </div>
+      <div class="row">
+        <label>Color Palette</label>
+        <select id="palette-select">
+          <option value="0" selected>Viridis</option>
+          <option value="1">Cividis</option>
+          <option value="2">Terrain</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Overlay</label>
+        <select id="overlay-select">
+          <option value="0" selected>None</option>
+          <option value="1">Slope</option>
+          <option value="2">Hillshade only</option>
+          <option value="3">Segmentation classes</option>
+          <option value="4">Building Footprints</option>
+        </select>
+      </div>
+    </div>
   </div>
-  <div id="structure-info" style="display:none;font-size:12px;color:#f4a261;margin-bottom:8px;"></div>
-  <div class="row">
-    <label for="file-btn">Upload Image</label>
-    <div id="file-btn" onclick="document.getElementById('file-input').click()">Choose file…</div>
-    <input type="file" id="file-input" accept="image/*,.tif,.tiff">
+
+  <!-- CAMERA -->
+  <div class="section">
+    <div class="section-header"><span class="chev">▾</span>CAMERA</div>
+    <div class="section-body">
+      <div class="row">
+        <label>Camera Mode</label>
+        <select id="camera-select">
+          <option value="orbit" selected>Orbit</option>
+          <option value="fps">First Person (WASD)</option>
+          <option value="aerial">Aerial (top-down)</option>
+          <option value="flythrough">Waypoint Flythrough</option>
+        </select>
+      </div>
+      <div class="row btn-row">
+        <button id="btn-reset-cam">Reset Camera</button>
+        <button id="btn-measure">Measure</button>
+      </div>
+      <div class="row">
+        <button id="btn-cross-section">Cross-Section</button>
+      </div>
+    </div>
   </div>
-  <div class="row">
-    <label>Vertical Exaggeration <span class="val" id="ve-value">2.0×</span></label>
-    <input type="range" id="ve-slider" min="0.1" max="10" step="0.1" value="2.0">
+
+  <!-- ANALYSIS -->
+  <div class="section collapsed">
+    <div class="section-header"><span class="chev">▾</span>ANALYSIS</div>
+    <div class="section-body">
+      <div class="row">
+        <label>Calibrate with Reference DEM</label>
+        <div class="upload-btn green" onclick="document.getElementById('ref-input').click()">Upload GeoTIFF…</div>
+        <input type="file" id="ref-input" accept=".tif,.tiff" style="display:none">
+      </div>
+      <div class="row">
+        <label>Validate against Reference</label>
+        <div class="upload-btn purple" onclick="document.getElementById('val-input').click()">Upload Reference DEM…</div>
+        <input type="file" id="val-input" accept=".tif,.tiff" style="display:none">
+      </div>
+    </div>
   </div>
-  <div class="row">
-    <label>Color Palette</label>
-    <select id="palette-select">
-      <option value="0" selected>Viridis</option>
-      <option value="1">Cividis</option>
-      <option value="2">Terrain</option>
-    </select>
+
+  <!-- GEOREFERENCE -->
+  <div class="section collapsed">
+    <div class="section-header"><span class="chev">▾</span>GEOREFERENCE</div>
+    <div class="section-body">
+      <div id="provenance"></div>
+      <div id="structure-info"></div>
+    </div>
   </div>
-  <div class="row">
-    <label>Overlay</label>
-    <select id="overlay-select">
-      <option value="0" selected>None</option>
-      <option value="1">Slope</option>
-      <option value="2">Hillshade only</option>
-      <option value="3">Segmentation classes</option>
-    </select>
-  </div>
-  <div class="row">
-    <label>Camera Mode</label>
-    <select id="camera-select">
-      <option value="orbit" selected>Orbit</option>
-      <option value="fps">First Person (WASD)</option>
-      <option value="aerial">Aerial (top-down)</option>
-      <option value="flythrough">Waypoint Flythrough</option>
-    </select>
-  </div>
-  <div class="row btn-row">
-    <button id="btn-reset-cam">Reset Camera</button>
-    <button id="btn-measure">Measure</button>
-  </div>
-  <div class="row btn-row">
-    <button id="btn-cross-section">Cross-Section</button>
-  </div>
-  <div class="row">
-    <label>Calibrate with Reference DEM</label>
-    <div id="ref-btn" onclick="document.getElementById('ref-input').click()"
-         style="cursor:pointer;background:#1a2a1a;border:1px solid #4ac97e;border-radius:5px;padding:5px 10px;font-size:12px;color:#4ac97e;text-align:center;">
-      Upload GeoTIFF…</div>
-    <input type="file" id="ref-input" accept=".tif,.tiff" style="display:none">
-  </div>
-  <div class="row">
-    <label>Validate against Reference</label>
-    <div id="val-btn" onclick="document.getElementById('val-input').click()"
-         style="cursor:pointer;background:#2a1a2a;border:1px solid #c47ee3;border-radius:5px;padding:5px 10px;font-size:12px;color:#c47ee3;text-align:center;">
-      Upload Reference DEM…</div>
-    <input type="file" id="val-input" accept=".tif,.tiff" style="display:none">
-  </div>
-  <div id="provenance"></div>
+
   <div id="warning"></div>
-  <div id="status">Ready — orbit: left drag · zoom: scroll · pan: right drag</div>
+  <div id="status">Ready — orbit: left-drag · zoom: scroll · pan: right-drag</div>
 </div>
 
-<!-- ── Measurement info panel ──────────────────────────────────────────── -->
-<div id="info-panel" style="display:none;">
+<!-- ── Floating elements ───────────────────────────────────────────────── -->
+<div id="stats-readout"></div>
+<div id="color-ramp">
+  <div class="ramp-label" id="ramp-max">—</div>
+  <canvas id="ramp-canvas" width="14" height="120"></canvas>
+  <div class="ramp-label" id="ramp-min">—</div>
+</div>
+<div id="height-tooltip"></div>
+
+<!-- ── Measure info ────────────────────────────────────────────────────── -->
+<div id="info-panel">
   <div class="label">Height at cursor</div>
   <div><span class="val-big" id="measure-val">—</span> <span class="val-unit" id="measure-unit">m</span></div>
-  <div style="margin-top:6px;font-size:12px;color:#666;" id="measure-coords"></div>
+  <div style="margin-top:4px;font-size:11px;color:#5a6a7a;" id="measure-coords"></div>
 </div>
 
-<!-- ── Cross-section profile ───────────────────────────────────────────── -->
+<!-- ── Cross-section ───────────────────────────────────────────────────── -->
 <div id="profile-panel">
   <canvas id="profile-canvas" width="400" height="180"></canvas>
 </div>
 
-<!-- ── Validation panel ────────────────────────────────────────────────── -->
+<!-- ── Validation ──────────────────────────────────────────────────────── -->
 <div id="validate-panel">
   <button id="validate-close">&times;</button>
   <h2>Validation Results</h2>
@@ -228,9 +364,9 @@
 <script>
 // ─── Constants ──────────────────────────────────────────────────────────────
 const GRID = 512, PLANE_SIZE = 900;
-const DEFAULT_CAM = { pos: [350, 500, 350], target: [0, 50, 0] };
+const DEFAULT_CAM = { pos: [350, 500, 350], target: [0, 0, 0] };
 
-// ─── Viridis & Cividis LUTs (64 stops, sampled from matplotlib) ─────────
+// ─── Viridis & Cividis LUTs (64 stops) ─────────────────────────────────────
 const VIRIDIS = [
   [0.267,0.004,0.329],[0.281,0.085,0.415],[0.278,0.140,0.457],[0.269,0.190,0.488],
   [0.254,0.236,0.510],[0.236,0.279,0.525],[0.216,0.318,0.534],[0.196,0.355,0.539],
@@ -248,8 +384,6 @@ const VIRIDIS = [
   [0.128,0.503,0.516],[0.124,0.533,0.503],[0.126,0.562,0.488],[0.135,0.591,0.470],
   [0.153,0.618,0.448],[0.180,0.644,0.424],[0.216,0.669,0.396],[0.259,0.692,0.366],
   [0.307,0.714,0.334],[0.360,0.734,0.299],[0.417,0.753,0.262],[0.476,0.770,0.224],
-  [0.537,0.785,0.185],[0.598,0.798,0.147],[0.658,0.810,0.112],[0.717,0.820,0.083],
-  [0.773,0.829,0.063],[0.826,0.837,0.055],[0.874,0.845,0.062],[0.917,0.854,0.085],
 ];
 
 const CIVIDIS = [
@@ -269,17 +403,11 @@ const CIVIDIS = [
   [0.259,0.279,0.389],[0.276,0.292,0.390],[0.293,0.304,0.391],[0.310,0.316,0.392],
   [0.326,0.329,0.393],[0.343,0.341,0.393],[0.359,0.354,0.394],[0.375,0.366,0.394],
   [0.392,0.379,0.393],[0.408,0.392,0.393],[0.425,0.405,0.392],[0.442,0.418,0.390],
-  [0.459,0.431,0.388],[0.477,0.444,0.385],[0.495,0.457,0.381],[0.514,0.470,0.376],
-  [0.533,0.484,0.370],[0.552,0.497,0.363],[0.572,0.510,0.354],[0.593,0.524,0.344],
 ];
 
-// Palette texture: each palette = one row, 64 texels wide
 function buildPaletteTexture() {
   const W = 64, H = 3;
   const data = new Uint8Array(W * H * 4);
-  // Row 0: viridis (first 40 entries, stretched)
-  // Row 1: cividis (first 40 entries, stretched)
-  // Row 2: terrain (procedural)
   const palettes = [VIRIDIS, CIVIDIS];
   for (let row = 0; row < 2; row++) {
     const lut = palettes[row];
@@ -287,35 +415,29 @@ function buildPaletteTexture() {
       const idx = Math.min(Math.floor(i / W * 40), 39);
       const c = lut[idx];
       const off = (row * W + i) * 4;
-      data[off+0] = Math.round(c[0]*255);
-      data[off+1] = Math.round(c[1]*255);
-      data[off+2] = Math.round(c[2]*255);
-      data[off+3] = 255;
+      data[off] = Math.round(c[0]*255); data[off+1] = Math.round(c[1]*255);
+      data[off+2] = Math.round(c[2]*255); data[off+3] = 255;
     }
   }
-  // Row 2: terrain (blue→green→brown→white)
   for (let i = 0; i < W; i++) {
     const t = i / (W - 1);
     let r, g, b;
     if (t < 0.33) {
       const s = t / 0.33;
-      r = 0.05 + s*0.08; g = 0.12 + s*0.31; b = 0.35 - s*0.17;
+      r = 0.05+s*0.08; g = 0.12+s*0.31; b = 0.35-s*0.17;
     } else if (t < 0.66) {
       const s = (t - 0.33) / 0.33;
-      r = 0.13 + s*0.49; g = 0.43 + s*0.09; b = 0.18 + s*0.12;
+      r = 0.13+s*0.49; g = 0.43+s*0.09; b = 0.18+s*0.12;
     } else {
       const s = (t - 0.66) / 0.34;
-      r = 0.62 + s*0.33; g = 0.52 + s*0.43; b = 0.30 + s*0.65;
+      r = 0.62+s*0.33; g = 0.52+s*0.43; b = 0.30+s*0.65;
     }
     const off = (2 * W + i) * 4;
-    data[off+0] = Math.round(r*255);
-    data[off+1] = Math.round(g*255);
-    data[off+2] = Math.round(b*255);
-    data[off+3] = 255;
+    data[off] = Math.round(r*255); data[off+1] = Math.round(g*255);
+    data[off+2] = Math.round(b*255); data[off+3] = 255;
   }
   const tex = new THREE.DataTexture(data, W, H, THREE.RGBAFormat, THREE.UnsignedByteType);
-  tex.minFilter = THREE.LinearFilter;
-  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter; tex.magFilter = THREE.LinearFilter;
   tex.needsUpdate = true;
   return tex;
 }
@@ -330,8 +452,8 @@ container.appendChild(renderer.domElement);
 console.log('[DepthWizard] Using RG-packed RGBA Uint8 heightmap — no float texture dependency.');
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0a0a12);
-scene.fog = new THREE.Fog(0x0a0a12, 800, 2000);
+scene.background = new THREE.Color(0x0d1117);
+scene.fog = new THREE.Fog(0x0d1117, 1200, 2500);
 
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 5000);
 camera.position.set(...DEFAULT_CAM.pos);
@@ -340,6 +462,7 @@ camera.lookAt(new THREE.Vector3(...DEFAULT_CAM.target));
 const orbitControls = new THREE.OrbitControls(camera, renderer.domElement);
 orbitControls.enableDamping = true;
 orbitControls.dampingFactor = 0.08;
+orbitControls.target.set(...DEFAULT_CAM.target);
 
 // ─── Shaders ────────────────────────────────────────────────────────────────
 const vertexShader = `
@@ -348,7 +471,6 @@ const vertexShader = `
   uniform float uMinHeight;
   uniform float uMaxHeight;
   uniform float uTexelSize;
-
   varying float vNormHeight;
   varying float vDiffuse;
   varying float vSlope;
@@ -362,28 +484,21 @@ const vertexShader = `
   void main() {
     vec2 uv = uv;
     float h = unpackHeight(uv);
-
     float eps = uTexelSize;
-    float hL = unpackHeight(uv + vec2(-eps,  0.0));
-    float hR = unpackHeight(uv + vec2( eps,  0.0));
-    float hD = unpackHeight(uv + vec2( 0.0, -eps));
-    float hU = unpackHeight(uv + vec2( 0.0,  eps));
-
+    float hL = unpackHeight(uv + vec2(-eps, 0.0));
+    float hR = unpackHeight(uv + vec2( eps, 0.0));
+    float hD = unpackHeight(uv + vec2(0.0, -eps));
+    float hU = unpackHeight(uv + vec2(0.0,  eps));
     float range = uMaxHeight - uMinHeight;
     float scale = range * uExaggeration;
     vec3 normal = normalize(vec3((hL - hR) * scale, 2.0, (hD - hU) * scale));
-
     vec3 sunDir = normalize(vec3(0.6, 1.0, 0.5));
     vDiffuse = max(dot(normal, sunDir), 0.0);
-
-    // Slope: angle in degrees
     float dzdx = (hR - hL) / (2.0 * eps) * range;
     float dzdy = (hU - hD) / (2.0 * eps) * range;
     vSlope = atan(sqrt(dzdx*dzdx + dzdy*dzdy)) * 57.2958;
-
     vNormHeight = h;
     vUv = uv;
-
     float worldH = h * scale;
     vec3 displaced = position + vec3(0.0, worldH, 0.0);
     gl_Position = projectionMatrix * modelViewMatrix * vec4(displaced, 1.0);
@@ -393,9 +508,9 @@ const vertexShader = `
 const fragmentShader = `
   uniform sampler2D uPalette;
   uniform sampler2D uSegMap;
+  uniform sampler2D uFootprintMap;
   uniform float uPaletteRow;
   uniform int   uOverlay;
-
   varying float vNormHeight;
   varying float vDiffuse;
   varying float vSlope;
@@ -404,23 +519,24 @@ const fragmentShader = `
   void main() {
     float palV = (uPaletteRow + 0.5) / 3.0;
     vec3 baseCol = texture2D(uPalette, vec2(vNormHeight, palV)).rgb;
-
     float shade = 0.35 + 0.65 * vDiffuse;
 
     if (uOverlay == 1) {
       float s = clamp(vSlope / 45.0, 0.0, 1.0);
       vec3 slopeCol;
-      if (s < 0.5) {
-        slopeCol = mix(vec3(0.1, 0.7, 0.2), vec3(0.9, 0.8, 0.1), s * 2.0);
-      } else {
-        slopeCol = mix(vec3(0.9, 0.8, 0.1), vec3(0.9, 0.1, 0.1), (s - 0.5) * 2.0);
-      }
+      if (s < 0.5) slopeCol = mix(vec3(0.1,0.7,0.2), vec3(0.9,0.8,0.1), s*2.0);
+      else slopeCol = mix(vec3(0.9,0.8,0.1), vec3(0.9,0.1,0.1), (s-0.5)*2.0);
       gl_FragColor = vec4(slopeCol * shade, 1.0);
     } else if (uOverlay == 2) {
       gl_FragColor = vec4(vec3(shade), 1.0);
     } else if (uOverlay == 3) {
       vec4 seg = texture2D(uSegMap, vUv);
       vec3 blended = mix(baseCol, seg.rgb, seg.a * 0.7);
+      gl_FragColor = vec4(blended * shade, 1.0);
+    } else if (uOverlay == 4) {
+      vec4 fp = texture2D(uFootprintMap, vUv);
+      vec3 fpCol = vec3(1.0, 0.94, 0.78);
+      vec3 blended = mix(baseCol, fpCol, fp.a * 0.8);
       gl_FragColor = vec4(blended * shade, 1.0);
     } else {
       gl_FragColor = vec4(baseCol * shade, 1.0);
@@ -437,37 +553,41 @@ heightTexture.needsUpdate = true;
 
 const paletteTexture = buildPaletteTexture();
 
-// Placeholder 2x2 for segmentation overlay
 const segPlaceholder = new Uint8Array(2 * 2 * 4);
 const segTexture = new THREE.DataTexture(segPlaceholder, 2, 2, THREE.RGBAFormat, THREE.UnsignedByteType);
 segTexture.minFilter = THREE.NearestFilter;
 segTexture.magFilter = THREE.NearestFilter;
 segTexture.needsUpdate = true;
 
+const fpPlaceholder = new Uint8Array(2 * 2 * 4);
+const fpTexture = new THREE.DataTexture(fpPlaceholder, 2, 2, THREE.RGBAFormat, THREE.UnsignedByteType);
+fpTexture.minFilter = THREE.NearestFilter;
+fpTexture.magFilter = THREE.NearestFilter;
+fpTexture.needsUpdate = true;
+
 const uniforms = {
-  uHeightMap:    { value: heightTexture },
-  uExaggeration: { value: 2.0 },
-  uMinHeight:    { value: 0.0 },
-  uMaxHeight:    { value: 1.0 },
-  uTexelSize:    { value: 0.5 },
-  uPalette:      { value: paletteTexture },
-  uSegMap:       { value: segTexture },
-  uPaletteRow:   { value: 0.0 },
-  uOverlay:      { value: 0 },
+  uHeightMap:     { value: heightTexture },
+  uExaggeration:  { value: 2.0 },
+  uMinHeight:     { value: 0.0 },
+  uMaxHeight:     { value: 1.0 },
+  uTexelSize:     { value: 0.5 },
+  uPalette:       { value: paletteTexture },
+  uSegMap:        { value: segTexture },
+  uFootprintMap:  { value: fpTexture },
+  uPaletteRow:    { value: 0.0 },
+  uOverlay:       { value: 0 },
 };
 
 const geometry = new THREE.PlaneGeometry(PLANE_SIZE, PLANE_SIZE, GRID, GRID);
 geometry.rotateX(-Math.PI / 2);
-
 const material = new THREE.ShaderMaterial({ vertexShader, fragmentShader, uniforms, side: THREE.DoubleSide });
 const mesh = new THREE.Mesh(geometry, material);
 scene.add(mesh);
 
-const grid = new THREE.GridHelper(PLANE_SIZE, 20, 0x223344, 0x223344);
+const grid = new THREE.GridHelper(PLANE_SIZE, 24, 0x1a2a3a, 0x131d28);
 grid.position.y = -0.5;
 scene.add(grid);
 
-// Cross-section line visualisation
 const crossLineGeo = new THREE.BufferGeometry();
 crossLineGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(6), 3));
 const crossLineMat = new THREE.LineBasicMaterial({ color: 0xff6644, linewidth: 2 });
@@ -487,6 +607,30 @@ let flythroughWaypoints = [];
 let flythroughT = 0;
 let flythroughActive = false;
 
+// ─── Panel toggle + section collapse ────────────────────────────────────────
+const panelEl = document.getElementById('panel');
+const panelToggle = document.getElementById('panel-toggle');
+const colorRampEl = document.getElementById('color-ramp');
+let panelOpen = true;
+
+panelToggle.addEventListener('click', () => {
+  panelOpen = !panelOpen;
+  panelEl.classList.toggle('collapsed', !panelOpen);
+  panelToggle.classList.toggle('shifted', !panelOpen);
+  colorRampEl.classList.toggle('shifted', !panelOpen);
+  panelToggle.textContent = panelOpen ? '›' : '‹';
+});
+
+document.querySelectorAll('.section-header').forEach(h => {
+  h.addEventListener('click', () => h.parentElement.classList.toggle('collapsed'));
+});
+
+document.getElementById('structure-check').addEventListener('change', function() {
+  const fp = document.getElementById('footprint-check');
+  fp.disabled = !this.checked;
+  if (!this.checked) fp.checked = false;
+});
+
 // ─── UI bindings ────────────────────────────────────────────────────────────
 const veSlider = document.getElementById('ve-slider');
 const veValue  = document.getElementById('ve-value');
@@ -498,6 +642,7 @@ veSlider.addEventListener('input', () => {
 
 document.getElementById('palette-select').addEventListener('change', e => {
   uniforms.uPaletteRow.value = parseFloat(e.target.value);
+  updateColorRamp();
 });
 
 document.getElementById('overlay-select').addEventListener('change', e => {
@@ -593,7 +738,6 @@ function updateFPS() {
   camera.lookAt(camera.position.clone().add(dir));
 }
 
-// Aerial scroll zoom
 renderer.domElement.addEventListener('wheel', e => {
   if (cameraMode === 'aerial') {
     camera.position.y = Math.max(50, Math.min(2000, camera.position.y + e.deltaY * 0.5));
@@ -605,13 +749,13 @@ renderer.domElement.addEventListener('wheel', e => {
 // ─── Waypoint flythrough ────────────────────────────────────────────────────
 function startFlythrough() {
   flythroughWaypoints = [
-    { pos: [-400, 300, 400], target: [0, 0, 0] },
-    { pos: [0, 200, 400],    target: [0, 0, 0] },
-    { pos: [400, 300, 200],  target: [0, 0, 0] },
-    { pos: [400, 400, -200], target: [0, 0, 0] },
-    { pos: [0, 500, -400],   target: [0, 0, 0] },
-    { pos: [-400, 300, -200],target: [0, 0, 0] },
-    { pos: [-400, 300, 400], target: [0, 0, 0] },
+    { pos: [-400,300,400],  target: [0,0,0] },
+    { pos: [0,200,400],     target: [0,0,0] },
+    { pos: [400,300,200],   target: [0,0,0] },
+    { pos: [400,400,-200],  target: [0,0,0] },
+    { pos: [0,500,-400],    target: [0,0,0] },
+    { pos: [-400,300,-200], target: [0,0,0] },
+    { pos: [-400,300,400],  target: [0,0,0] },
   ];
   flythroughT = 0;
   flythroughActive = true;
@@ -623,23 +767,15 @@ function updateFlythrough() {
   if (!flythroughActive || flythroughWaypoints.length < 2) return;
   flythroughT += 0.001;
   if (flythroughT >= 1.0) flythroughT = 0;
-
   const n = flythroughWaypoints.length;
   const segment = flythroughT * (n - 1);
   const i = Math.floor(segment);
   const frac = segment - i;
   const a = flythroughWaypoints[i];
   const b = flythroughWaypoints[Math.min(i + 1, n - 1)];
-
-  camera.position.lerpVectors(
-    new THREE.Vector3(...a.pos),
-    new THREE.Vector3(...b.pos),
-    frac
-  );
+  camera.position.lerpVectors(new THREE.Vector3(...a.pos), new THREE.Vector3(...b.pos), frac);
   const lookTarget = new THREE.Vector3().lerpVectors(
-    new THREE.Vector3(...a.target),
-    new THREE.Vector3(...b.target),
-    frac
+    new THREE.Vector3(...a.target), new THREE.Vector3(...b.target), frac
   );
   camera.lookAt(lookTarget);
 }
@@ -657,42 +793,55 @@ renderer.domElement.addEventListener('click', () => {
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 const infoPanel = document.getElementById('info-panel');
+const tooltip = document.getElementById('height-tooltip');
 
 document.getElementById('btn-measure').addEventListener('click', () => {
   measureActive = !measureActive;
   const btn = document.getElementById('btn-measure');
-  btn.style.background = measureActive ? '#5a3a1f' : '#1e3a5f';
+  btn.classList.toggle('active', measureActive);
   btn.textContent = measureActive ? 'Measuring…' : 'Measure';
   infoPanel.style.display = measureActive ? 'block' : 'none';
   if (crossSectionMode) toggleCrossSection();
 });
 
 renderer.domElement.addEventListener('mousemove', e => {
-  if (!measureActive || !currentFloatData || !currentMeta) return;
+  if (!currentFloatData || !currentMeta) { tooltip.style.display = 'none'; return; }
+  if (cameraMode === 'fps') { tooltip.style.display = 'none'; return; }
+
   mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
   mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
   raycaster.setFromCamera(mouse, camera);
   const hits = raycaster.intersectObject(mesh);
-  if (hits.length === 0) return;
+  if (hits.length === 0) { tooltip.style.display = 'none'; return; }
 
   const uv = hits[0].uv;
-  if (!uv) return;
+  if (!uv) { tooltip.style.display = 'none'; return; }
   const w = currentMeta.width, h = currentMeta.height;
   const px = Math.floor(uv.x * w), py = Math.floor((1 - uv.y) * h);
   const idx = py * w + px;
   if (idx >= 0 && idx < currentFloatData.length) {
     const val = currentFloatData[idx];
-    document.getElementById('measure-val').textContent = val.toFixed(1);
-    document.getElementById('measure-unit').textContent = currentMeta.units === 'metres' ? 'm' : 'rel';
-    document.getElementById('measure-coords').textContent = `px (${px}, ${py})`;
+    const unit = currentMeta.units === 'metres' ? 'm' : 'rel';
+    tooltip.textContent = val.toFixed(1) + ' ' + unit;
+    tooltip.style.left = (e.clientX + 16) + 'px';
+    tooltip.style.top = (e.clientY - 10) + 'px';
+    tooltip.style.display = 'block';
+
+    if (measureActive) {
+      document.getElementById('measure-val').textContent = val.toFixed(1);
+      document.getElementById('measure-unit').textContent = unit;
+      document.getElementById('measure-coords').textContent = 'px (' + px + ', ' + py + ')';
+    }
   }
 });
+
+renderer.domElement.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
 
 // ─── Cross-section ──────────────────────────────────────────────────────────
 function toggleCrossSection() {
   crossSectionMode = !crossSectionMode;
   const btn = document.getElementById('btn-cross-section');
-  btn.style.background = crossSectionMode ? '#5a3a1f' : '#1e3a5f';
+  btn.classList.toggle('active', crossSectionMode);
   btn.textContent = crossSectionMode ? 'Click 2 points…' : 'Cross-Section';
   crossSectionStart = null;
   crossLine.visible = false;
@@ -721,7 +870,7 @@ renderer.domElement.addEventListener('click', e => {
     drawCrossSection(crossSectionStart, pt);
     crossSectionMode = false;
     const btn = document.getElementById('btn-cross-section');
-    btn.style.background = '#1e3a5f';
+    btn.classList.remove('active');
     btn.textContent = 'Cross-Section';
   }
 });
@@ -740,16 +889,12 @@ function drawCrossSection(a, b) {
     heights.push(idx >= 0 && idx < currentFloatData.length ? currentFloatData[idx] : 0);
   }
 
-  // Draw line on terrain
   const posArr = crossLine.geometry.attributes.position;
-  const range = currentMeta.max_height - currentMeta.min_height || 1;
-  const exag = uniforms.uExaggeration.value;
   posArr.setXYZ(0, a.world.x, a.world.y, a.world.z);
   posArr.setXYZ(1, b.world.x, b.world.y, b.world.z);
   posArr.needsUpdate = true;
   crossLine.visible = true;
 
-  // Draw 2D profile
   const canvas = document.getElementById('profile-canvas');
   const ctx = canvas.getContext('2d');
   const cw = canvas.width, ch = canvas.height;
@@ -758,21 +903,16 @@ function drawCrossSection(a, b) {
   const hMin = Math.min(...heights), hMax = Math.max(...heights);
   const hRange = hMax - hMin || 1;
 
-  // Background
-  ctx.fillStyle = '#0e0e1a';
+  ctx.fillStyle = '#0d1117';
   ctx.fillRect(0, 0, cw, ch);
 
-  // Grid lines
-  ctx.strokeStyle = '#1a2a3a';
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#1a2a3a'; ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
     const y = 20 + (ch - 40) * (1 - i / 4);
     ctx.beginPath(); ctx.moveTo(40, y); ctx.lineTo(cw - 10, y); ctx.stroke();
   }
 
-  // Profile line
-  ctx.strokeStyle = '#7ec8e3';
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#7ec8e3'; ctx.lineWidth = 2;
   ctx.beginPath();
   for (let i = 0; i <= numSamples; i++) {
     const x = 40 + (cw - 50) * (i / numSamples);
@@ -781,30 +921,52 @@ function drawCrossSection(a, b) {
   }
   ctx.stroke();
 
-  // Fill under curve
   ctx.lineTo(40 + (cw - 50), ch - 20);
   ctx.lineTo(40, ch - 20);
   ctx.closePath();
-  ctx.fillStyle = 'rgba(126, 200, 227, 0.12)';
+  ctx.fillStyle = 'rgba(126,200,227,0.08)';
   ctx.fill();
 
-  // Labels
-  ctx.fillStyle = '#999';
-  ctx.font = '11px Arial';
-  ctx.textAlign = 'right';
+  ctx.fillStyle = '#6a7a8a'; ctx.font = '11px system-ui'; ctx.textAlign = 'right';
   for (let i = 0; i <= 4; i++) {
     const y = 20 + (ch - 40) * (1 - i / 4);
-    const val = hMin + hRange * (i / 4);
-    ctx.fillText(val.toFixed(1), 36, y + 4);
+    ctx.fillText((hMin + hRange * (i / 4)).toFixed(1), 36, y + 4);
   }
 
-  // Title
-  ctx.fillStyle = '#7ec8e3';
-  ctx.font = 'bold 12px Arial';
-  ctx.textAlign = 'left';
+  ctx.fillStyle = '#7ec8e3'; ctx.font = 'bold 11px system-ui'; ctx.textAlign = 'left';
   ctx.fillText('Cross-Section Profile', 42, 14);
 
   document.getElementById('profile-panel').style.display = 'block';
+}
+
+// ─── Color ramp ─────────────────────────────────────────────────────────────
+function updateColorRamp() {
+  const canvas = document.getElementById('ramp-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const ch = canvas.height, cw = canvas.width;
+  const palIdx = Math.floor(uniforms.uPaletteRow.value);
+  const palettes = [VIRIDIS, CIVIDIS];
+
+  for (let y = 0; y < ch; y++) {
+    const t = 1 - y / (ch - 1);
+    let r, g, b;
+    if (palIdx < 2) {
+      const idx = Math.min(Math.floor(t * 40), 39);
+      [r, g, b] = palettes[palIdx][idx];
+    } else {
+      if (t < 0.33) { const s = t/0.33; r=0.05+s*0.08; g=0.12+s*0.31; b=0.35-s*0.17; }
+      else if (t < 0.66) { const s=(t-0.33)/0.33; r=0.13+s*0.49; g=0.43+s*0.09; b=0.18+s*0.12; }
+      else { const s=(t-0.66)/0.34; r=0.62+s*0.33; g=0.52+s*0.43; b=0.30+s*0.65; }
+    }
+    ctx.fillStyle = 'rgb(' + Math.round(r*255) + ',' + Math.round(g*255) + ',' + Math.round(b*255) + ')';
+    ctx.fillRect(0, y, cw, 1);
+  }
+
+  if (currentMeta) {
+    document.getElementById('ramp-max').textContent = currentMeta.max_height.toFixed(1);
+    document.getElementById('ramp-min').textContent = currentMeta.min_height.toFixed(1);
+  }
 }
 
 // ─── Upload ─────────────────────────────────────────────────────────────────
@@ -817,11 +979,15 @@ document.getElementById('file-input').addEventListener('change', async () => {
   const estimator = document.getElementById('estimator-select').value;
   const detrend = document.getElementById('detrend-check').checked;
   const structure = document.getElementById('structure-check').checked;
+  const footprintsOn = document.getElementById('footprint-check').checked && structure;
   const formData = new FormData();
   formData.append('file', file);
 
   try {
-    const resp = await fetch(`/upload?estimator=${estimator}&detrend=${detrend}&structure=${structure}`, { method: 'POST', body: formData });
+    const resp = await fetch(
+      '/upload?estimator=' + estimator + '&detrend=' + detrend + '&structure=' + structure + '&footprints=' + footprintsOn,
+      { method: 'POST', body: formData }
+    );
     if (resp.status === 503) {
       const err = await resp.json().catch(() => ({}));
       status.textContent = err.detail || 'Model still loading — try again in a moment.';
@@ -836,10 +1002,10 @@ document.getElementById('file-input').addEventListener('change', async () => {
     const buf = await resp.arrayBuffer();
     const view = new DataView(buf);
     const metaLen = view.getUint32(0, true);
-
     const metaBytes = new Uint8Array(buf, 4, metaLen);
     const meta = JSON.parse(new TextDecoder().decode(metaBytes));
-    const { width, height, min_height, max_height } = meta;
+    const width = meta.width, height = meta.height;
+    const min_height = meta.min_height, max_height = meta.max_height;
 
     const rawByteOffset = 4 + metaLen;
     const rawByteLength = width * height * 4;
@@ -850,12 +1016,10 @@ document.getElementById('file-input').addEventListener('change', async () => {
     let mn = Infinity, mx = -Infinity, sum = 0;
     for (let i = 0; i < floatData.length; i++) {
       const v = floatData[i];
-      if (v < mn) mn = v;
-      if (v > mx) mx = v;
-      sum += v;
+      if (v < mn) mn = v; if (v > mx) mx = v; sum += v;
     }
-    console.log(`[DepthWizard] float32: len=${floatData.length}, min=${mn.toFixed(2)}, max=${mx.toFixed(2)}, mean=${(sum/floatData.length).toFixed(2)}`);
-    console.log(`[DepthWizard] metadata:`, meta);
+    console.log('[DepthWizard] float32: len=' + floatData.length + ', min=' + mn.toFixed(2) + ', max=' + mx.toFixed(2) + ', mean=' + (sum/floatData.length).toFixed(2));
+    console.log('[DepthWizard] metadata:', meta);
     if (mn === mx) console.warn('[DepthWizard] *** flat data — bug is backend or parsing ***');
 
     const warningEl = document.getElementById('warning');
@@ -866,7 +1030,6 @@ document.getElementById('file-input').addEventListener('change', async () => {
       warningEl.style.display = 'none';
     }
 
-    // Store for measurement / cross-section
     currentFloatData = floatData;
     currentMeta = meta;
 
@@ -875,7 +1038,7 @@ document.getElementById('file-input').addEventListener('change', async () => {
     const rgba = new Uint8Array(width * height * 4);
     for (let i = 0; i < width * height; i++) {
       const norm = (floatData[i] - min_height) / range;
-      const val  = Math.round(Math.min(Math.max(norm, 0.0), 1.0) * 65535);
+      const val = Math.round(Math.min(Math.max(norm, 0.0), 1.0) * 65535);
       rgba[i * 4 + 0] = (val >> 8) & 0xFF;
       rgba[i * 4 + 1] =  val       & 0xFF;
       rgba[i * 4 + 2] = 0;
@@ -892,38 +1055,48 @@ document.getElementById('file-input').addEventListener('change', async () => {
     uniforms.uMaxHeight.value = max_height;
     uniforms.uTexelSize.value = 1.0 / Math.max(width, height);
 
-    // Timing info
-    let timingStr = '';
+    // Timing
+    var timingStr = '';
     if (meta.timing) {
-      const t = meta.timing;
-      const parts = [];
-      if (t.depth_inference) parts.push(`depth ${t.depth_inference}s`);
-      if (t.structure_dsm) parts.push(`structure ${t.structure_dsm}s`);
-      parts.push(`total ${t.total}s`);
-      timingStr = ` · ${parts.join(' + ')}`;
+      var t = meta.timing, parts = [];
+      if (t.depth_inference) parts.push('depth ' + t.depth_inference + 's');
+      if (t.structure_dsm) parts.push('structure ' + t.structure_dsm + 's');
+      parts.push('total ' + t.total + 's');
+      timingStr = ' · ' + parts.join(' + ');
     }
-    status.textContent = `Loaded ${width}×${height} · ${min_height.toFixed(1)}–${max_height.toFixed(1)} m${timingStr}`;
+    status.textContent = 'Loaded ' + width + '×' + height + ' · ' + min_height.toFixed(1) + '–' + max_height.toFixed(1) + ' m' + timingStr;
     updateProvenance(meta.provenance || 'relative');
 
-    // Structure-aware stats
-    const structInfo = document.getElementById('structure-info');
+    // Stats readout
+    var sr = document.getElementById('stats-readout');
+    sr.innerHTML =
+      '<span class="sv">' + width + '×' + height + '</span> px' +
+      ' · <span class="sv">' + min_height.toFixed(1) + '</span>–<span class="sv">' + max_height.toFixed(1) + '</span> m' +
+      (meta.timing ? ' · <span class="sv">' + meta.timing.total + 's</span>' : '');
+    sr.style.display = 'block';
+
+    // Color ramp
+    colorRampEl.style.display = 'flex';
+    updateColorRamp();
+
+    // Structure stats
+    var structInfo = document.getElementById('structure-info');
     if (meta.structure_stats) {
-      const s = meta.structure_stats;
-      const bldg = s.BUILDING || { count: 0, mean_height: 0 };
-      structInfo.innerHTML = `Buildings: ${bldg.count} regions · ` +
-        `${bldg.mean_height.toFixed(1)} m avg`;
+      var s = meta.structure_stats;
+      var bldg = s.BUILDING || { count: 0, mean_height: 0 };
+      structInfo.innerHTML = 'Buildings: ' + bldg.count + ' regions · ' + bldg.mean_height.toFixed(1) + ' m avg';
       structInfo.style.display = 'block';
-      // Fetch segmentation overlay as texture
-      fetch('/structure-map').then(r => r.ok ? r.blob() : null).then(blob => {
+
+      fetch('/structure-map').then(function(r) { return r.ok ? r.blob() : null; }).then(function(blob) {
         if (!blob) return;
-        const img = new window.Image();
-        img.onload = () => {
-          const c = document.createElement('canvas');
+        var img = new window.Image();
+        img.onload = function() {
+          var c = document.createElement('canvas');
           c.width = img.width; c.height = img.height;
-          const ctx = c.getContext('2d');
+          var ctx = c.getContext('2d');
           ctx.drawImage(img, 0, 0);
-          const px = ctx.getImageData(0, 0, c.width, c.height);
-          const segTex = new THREE.DataTexture(
+          var px = ctx.getImageData(0, 0, c.width, c.height);
+          var segTex = new THREE.DataTexture(
             new Uint8Array(px.data), c.width, c.height,
             THREE.RGBAFormat, THREE.UnsignedByteType
           );
@@ -931,13 +1104,34 @@ document.getElementById('file-input').addEventListener('change', async () => {
           segTex.magFilter = THREE.NearestFilter;
           segTex.needsUpdate = true;
           uniforms.uSegMap.value = segTex;
-          console.log('[DepthWizard] Segmentation overlay loaded', c.width, c.height);
         };
         img.src = URL.createObjectURL(blob);
       });
+
+      if (footprintsOn) {
+        fetch('/footprint-overlay').then(function(r) { return r.ok ? r.blob() : null; }).then(function(blob) {
+          if (!blob) return;
+          var img = new window.Image();
+          img.onload = function() {
+            var c = document.createElement('canvas');
+            c.width = img.width; c.height = img.height;
+            var ctx = c.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            var px = ctx.getImageData(0, 0, c.width, c.height);
+            var fpTex = new THREE.DataTexture(
+              new Uint8Array(px.data), c.width, c.height,
+              THREE.RGBAFormat, THREE.UnsignedByteType
+            );
+            fpTex.minFilter = THREE.NearestFilter;
+            fpTex.magFilter = THREE.NearestFilter;
+            fpTex.needsUpdate = true;
+            uniforms.uFootprintMap.value = fpTex;
+          };
+          img.src = URL.createObjectURL(blob);
+        });
+      }
     } else {
       structInfo.style.display = 'none';
-      window._segOverlay = null;
     }
 
   } catch (e) {
@@ -948,43 +1142,44 @@ document.getElementById('file-input').addEventListener('change', async () => {
 
 // ─── Provenance badge ───────────────────────────────────────────────────────
 function updateProvenance(prov) {
-  const el = document.getElementById('provenance');
-  const labels = {
+  var el = document.getElementById('provenance');
+  var labels = {
     'relative': ['RELATIVE', 'badge-relative'],
     'geotiff-direct': ['GeoTIFF DIRECT', 'badge-geotiff'],
     'srtm-calibrated': ['SRTM CALIBRATED', 'badge-calibrated'],
   };
-  const [text, cls] = labels[prov] || ['RELATIVE', 'badge-relative'];
-  el.innerHTML = `<span class="badge ${cls}">${text}</span>`;
+  var pair = labels[prov] || ['RELATIVE', 'badge-relative'];
+  el.innerHTML = '<span class="badge ' + pair[1] + '">' + pair[0] + '</span>';
 }
 
-// ─── Reference DEM calibration upload ───────────────────────────────────────
+// ─── Calibration ────────────────────────────────────────────────────────────
 function applyResponseToViewer(buf) {
-  const view = new DataView(buf);
-  const metaLen = view.getUint32(0, true);
-  const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, metaLen)));
-  const { width, height, min_height, max_height } = meta;
+  var view = new DataView(buf);
+  var metaLen = view.getUint32(0, true);
+  var meta = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, metaLen)));
+  var width = meta.width, height = meta.height;
+  var min_height = meta.min_height, max_height = meta.max_height;
 
-  const rawOff = 4 + metaLen;
-  const aligned = new ArrayBuffer(width * height * 4);
+  var rawOff = 4 + metaLen;
+  var aligned = new ArrayBuffer(width * height * 4);
   new Uint8Array(aligned).set(new Uint8Array(buf, rawOff, width * height * 4));
-  const floatData = new Float32Array(aligned);
+  var floatData = new Float32Array(aligned);
 
   currentFloatData = floatData;
   currentMeta = meta;
 
-  const range = max_height - min_height || 1.0;
-  const rgba = new Uint8Array(width * height * 4);
-  for (let i = 0; i < width * height; i++) {
-    const norm = (floatData[i] - min_height) / range;
-    const val = Math.round(Math.min(Math.max(norm, 0.0), 1.0) * 65535);
+  var range = max_height - min_height || 1.0;
+  var rgba = new Uint8Array(width * height * 4);
+  for (var i = 0; i < width * height; i++) {
+    var norm = (floatData[i] - min_height) / range;
+    var val = Math.round(Math.min(Math.max(norm, 0.0), 1.0) * 65535);
     rgba[i * 4 + 0] = (val >> 8) & 0xFF;
     rgba[i * 4 + 1] = val & 0xFF;
     rgba[i * 4 + 2] = 0;
     rgba[i * 4 + 3] = 255;
   }
 
-  const tex = new THREE.DataTexture(rgba, width, height, THREE.RGBAFormat, THREE.UnsignedByteType);
+  var tex = new THREE.DataTexture(rgba, width, height, THREE.RGBAFormat, THREE.UnsignedByteType);
   tex.minFilter = THREE.NearestFilter;
   tex.magFilter = THREE.NearestFilter;
   tex.needsUpdate = true;
@@ -995,23 +1190,29 @@ function applyResponseToViewer(buf) {
   uniforms.uTexelSize.value = 1.0 / Math.max(width, height);
 
   document.getElementById('status').textContent =
-    `Loaded ${width}×${height} · ${min_height.toFixed(1)}–${max_height.toFixed(1)} m`;
+    'Loaded ' + width + '×' + height + ' · ' + min_height.toFixed(1) + '–' + max_height.toFixed(1) + ' m';
   updateProvenance(meta.provenance || 'relative');
+
+  var sr = document.getElementById('stats-readout');
+  sr.innerHTML =
+    '<span class="sv">' + width + '×' + height + '</span> px' +
+    ' · <span class="sv">' + min_height.toFixed(1) + '</span>–<span class="sv">' + max_height.toFixed(1) + '</span> m';
+  sr.style.display = 'block';
+  colorRampEl.style.display = 'flex';
+  updateColorRamp();
 }
 
 document.getElementById('ref-input').addEventListener('change', async () => {
-  const file = document.getElementById('ref-input').files[0];
+  var file = document.getElementById('ref-input').files[0];
   if (!file) return;
-  const status = document.getElementById('status');
+  var status = document.getElementById('status');
   status.textContent = 'Calibrating with reference DEM…';
-
-  const formData = new FormData();
+  var formData = new FormData();
   formData.append('reference', file);
-
   try {
-    const resp = await fetch('/calibrate', { method: 'POST', body: formData });
+    var resp = await fetch('/calibrate', { method: 'POST', body: formData });
     if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
+      var err = await resp.json().catch(() => ({}));
       status.textContent = err.detail || 'Calibration failed';
       return;
     }
@@ -1021,28 +1222,26 @@ document.getElementById('ref-input').addEventListener('change', async () => {
   }
 });
 
-// ─── Validation panel ───────────────────────────────────────────────────────
+// ─── Validation ─────────────────────────────────────────────────────────────
 document.getElementById('validate-close').addEventListener('click', () => {
   document.getElementById('validate-panel').style.display = 'none';
 });
 
 document.getElementById('val-input').addEventListener('change', async () => {
-  const file = document.getElementById('val-input').files[0];
+  var file = document.getElementById('val-input').files[0];
   if (!file) return;
-  const status = document.getElementById('status');
+  var status = document.getElementById('status');
   status.textContent = 'Validating against reference DEM…';
-
-  const formData = new FormData();
+  var formData = new FormData();
   formData.append('reference', file);
-
   try {
-    const resp = await fetch('/validate', { method: 'POST', body: formData });
+    var resp = await fetch('/validate', { method: 'POST', body: formData });
     if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
+      var err = await resp.json().catch(() => ({}));
       status.textContent = err.detail || 'Validation failed';
       return;
     }
-    const data = await resp.json();
+    var data = await resp.json();
     renderValidation(data);
     status.textContent = 'Validation complete — see panel';
   } catch (e) {
@@ -1053,105 +1252,78 @@ document.getElementById('val-input').addEventListener('change', async () => {
 function renderValidation(data) {
   document.getElementById('validate-panel').style.display = 'block';
 
-  // Stats table
-  const grid = document.getElementById('stats-grid');
-  const stats = [
-    ['MAE', data.mae + ' m'],
-    ['RMSE', data.rmse + ' m'],
-    ['Median AE', data.median_ae + ' m'],
-    ['R²', data.r_squared],
-    ['Bias', data.bias + ' m'],
+  var gridEl = document.getElementById('stats-grid');
+  var stats = [
+    ['MAE', data.mae + ' m'], ['RMSE', data.rmse + ' m'],
+    ['Median AE', data.median_ae + ' m'], ['R²', data.r_squared], ['Bias', data.bias + ' m'],
   ];
-  grid.innerHTML = stats.map(([l, v]) =>
-    `<span class="lbl">${l}</span><span class="val">${v}</span>`
-  ).join('');
+  gridEl.innerHTML = stats.map(function(s) {
+    return '<span class="lbl">' + s[0] + '</span><span class="val">' + s[1] + '</span>';
+  }).join('');
 
-  // Error map
-  const emCanvas = document.getElementById('error-map-canvas');
-  const emCtx = emCanvas.getContext('2d');
-  const w = data.width, h = data.height;
-  const errArr = data.error_map;
-  const cw = emCanvas.width, ch = emCanvas.height;
+  var emCanvas = document.getElementById('error-map-canvas');
+  var emCtx = emCanvas.getContext('2d');
+  var w = data.width, h = data.height;
+  var errArr = data.error_map;
+  var cw = emCanvas.width, ch = emCanvas.height;
   emCtx.clearRect(0, 0, cw, ch);
 
-  let eMin = Infinity, eMax = -Infinity;
-  for (let i = 0; i < errArr.length; i++) {
+  var eMin = Infinity, eMax = -Infinity;
+  for (var i = 0; i < errArr.length; i++) {
     if (errArr[i] < eMin) eMin = errArr[i];
     if (errArr[i] > eMax) eMax = errArr[i];
   }
-  const eAbs = Math.max(Math.abs(eMin), Math.abs(eMax)) || 1;
+  var eAbs = Math.max(Math.abs(eMin), Math.abs(eMax)) || 1;
 
-  const imgData = emCtx.createImageData(cw, ch);
-  for (let y = 0; y < ch; y++) {
-    for (let x = 0; x < cw; x++) {
-      const sx = Math.floor(x / cw * w), sy = Math.floor(y / ch * h);
-      const e = errArr[sy * w + sx] || 0;
-      const t = e / eAbs; // [-1, 1]
-      let r, g, b;
+  var imgData = emCtx.createImageData(cw, ch);
+  for (var y = 0; y < ch; y++) {
+    for (var x = 0; x < cw; x++) {
+      var sx = Math.floor(x / cw * w), sy = Math.floor(y / ch * h);
+      var e = errArr[sy * w + sx] || 0;
+      var t = e / eAbs;
+      var r, g, b;
       if (t < 0) { r = 0; g = 0; b = Math.round(-t * 200); }
       else       { r = Math.round(t * 200); g = 0; b = 0; }
-      const off = (y * cw + x) * 4;
+      var off = (y * cw + x) * 4;
       imgData.data[off] = r; imgData.data[off+1] = g;
       imgData.data[off+2] = b; imgData.data[off+3] = 255;
     }
   }
   emCtx.putImageData(imgData, 0, 0);
+  emCtx.fillStyle = '#7ec8e3'; emCtx.font = 'bold 11px system-ui'; emCtx.fillText('Error Map', 4, 12);
+  emCtx.fillStyle = '#66f'; emCtx.fillText('Blue: under', 4, ch - 16);
+  emCtx.fillStyle = '#f66'; emCtx.fillText('Red: over', 4, ch - 4);
 
-  // Labels
-  emCtx.fillStyle = '#7ec8e3';
-  emCtx.font = 'bold 11px Arial';
-  emCtx.fillText('Error Map', 4, 12);
-  emCtx.fillStyle = '#66f';
-  emCtx.fillText('Blue: under', 4, ch - 16);
-  emCtx.fillStyle = '#f66';
-  emCtx.fillText('Red: over', 4, ch - 4);
-
-  // Scatter plot
-  const scCanvas = document.getElementById('scatter-canvas');
-  const scCtx = scCanvas.getContext('2d');
-  const sw = scCanvas.width, sh = scCanvas.height;
+  var scCanvas = document.getElementById('scatter-canvas');
+  var scCtx = scCanvas.getContext('2d');
+  var sw = scCanvas.width, sh = scCanvas.height;
   scCtx.clearRect(0, 0, sw, sh);
-  scCtx.fillStyle = '#0e0e1a';
+  scCtx.fillStyle = '#0d1117';
   scCtx.fillRect(0, 0, sw, sh);
 
-  const preds = data.scatter_pred, refs = data.scatter_ref;
-  let allMin = Infinity, allMax = -Infinity;
-  for (let i = 0; i < preds.length; i++) {
-    allMin = Math.min(allMin, preds[i], refs[i]);
-    allMax = Math.max(allMax, preds[i], refs[i]);
+  var preds = data.scatter_pred, refs = data.scatter_ref;
+  var allMin = Infinity, allMax = -Infinity;
+  for (var j = 0; j < preds.length; j++) {
+    allMin = Math.min(allMin, preds[j], refs[j]);
+    allMax = Math.max(allMax, preds[j], refs[j]);
   }
-  const range = allMax - allMin || 1;
-  const margin = 30;
+  var range = allMax - allMin || 1;
+  var margin = 30;
 
-  // 1:1 line
-  scCtx.strokeStyle = '#444';
-  scCtx.lineWidth = 1;
-  scCtx.beginPath();
-  scCtx.moveTo(margin, sh - margin);
-  scCtx.lineTo(sw - 5, 5);
-  scCtx.stroke();
+  scCtx.strokeStyle = '#333'; scCtx.lineWidth = 1;
+  scCtx.beginPath(); scCtx.moveTo(margin, sh - margin); scCtx.lineTo(sw - 5, 5); scCtx.stroke();
 
-  // Points
-  scCtx.fillStyle = 'rgba(126, 200, 227, 0.4)';
-  for (let i = 0; i < preds.length; i++) {
-    const x = margin + (refs[i] - allMin) / range * (sw - margin - 5);
-    const y = (sh - margin) - (preds[i] - allMin) / range * (sh - margin - 5);
-    scCtx.beginPath();
-    scCtx.arc(x, y, 2, 0, Math.PI * 2);
-    scCtx.fill();
+  scCtx.fillStyle = 'rgba(126,200,227,0.4)';
+  for (var k = 0; k < preds.length; k++) {
+    var px = margin + (refs[k] - allMin) / range * (sw - margin - 5);
+    var py = (sh - margin) - (preds[k] - allMin) / range * (sh - margin - 5);
+    scCtx.beginPath(); scCtx.arc(px, py, 2, 0, Math.PI * 2); scCtx.fill();
   }
 
-  // Labels
-  scCtx.fillStyle = '#7ec8e3';
-  scCtx.font = 'bold 11px Arial';
-  scCtx.fillText('Pred vs Ref', 32, 14);
-  scCtx.fillStyle = '#888';
-  scCtx.font = '10px Arial';
-  scCtx.save();
-  scCtx.translate(10, sh / 2);
-  scCtx.rotate(-Math.PI / 2);
-  scCtx.fillText('Predicted', 0, 0);
-  scCtx.restore();
+  scCtx.fillStyle = '#7ec8e3'; scCtx.font = 'bold 11px system-ui'; scCtx.fillText('Pred vs Ref', 32, 14);
+  scCtx.fillStyle = '#6a7a8a'; scCtx.font = '10px system-ui';
+  scCtx.save(); scCtx.translate(10, sh / 2); scCtx.rotate(-Math.PI / 2);
+  scCtx.fillText('Predicted', 0, 0); scCtx.restore();
   scCtx.fillText('Reference', sw / 2 - 20, sh - 4);
 }
 
