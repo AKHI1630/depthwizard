@@ -242,6 +242,18 @@
         <div class="upload-btn accent" onclick="document.getElementById('file-input').click()">Choose file…</div>
         <input type="file" id="file-input" accept="image/*,.tif,.tiff" style="display:none">
       </div>
+      <div class="row" style="margin-top:4px;">
+        <label>SAM Pipeline</label>
+        <div class="upload-btn" id="btn-segment" style="font-size:11px;">Segment &amp; Build 3D</div>
+      </div>
+      <div class="row" style="display:none;" id="sun-row">
+        <label>Sun Elevation <span class="val" id="sun-elev-val">45°</span></label>
+        <input type="range" id="sun-elev-slider" min="5" max="85" step="1" value="45">
+      </div>
+      <div class="row" style="display:none;" id="gsd-row">
+        <label>GSD (m/px) <span class="val" id="gsd-val">0.50</span></label>
+        <input type="range" id="gsd-slider" min="0.1" max="5.0" step="0.05" value="0.50">
+      </div>
     </div>
   </div>
 
@@ -606,6 +618,186 @@ const fpsState = { forward: 0, right: 0, up: 0, yaw: 0, pitch: 0, speed: 3.0 };
 let flythroughWaypoints = [];
 let flythroughT = 0;
 let flythroughActive = false;
+let lod1Group = null; // THREE.Group for LOD1 buildings/trees
+let lod1Active = false;
+let lod1Instances = null; // instance data from /estimate-heights
+
+// ─── LOD1 Extrusion Renderer ───────────────────────────────────────────────
+function buildLOD1Scene(data, sourceImageUrl) {
+  // Clear previous LOD1 group
+  if (lod1Group) { scene.remove(lod1Group); lod1Group = null; }
+  lod1Group = new THREE.Group();
+  lod1Active = true;
+  lod1Instances = data.instances;
+
+  const instances = data.instances || [];
+  const imgW = 512, imgH = 512; // assume square; adjust if metadata says otherwise
+  const scaleX = PLANE_SIZE / imgW;
+  const scaleZ = PLANE_SIZE / imgH;
+  const offsetX = -PLANE_SIZE / 2;
+  const offsetZ = -PLANE_SIZE / 2;
+
+  // Exaggeration factor
+  const ve = parseFloat(document.getElementById('ve-slider').value) || 2.0;
+
+  // Building material
+  const bldgMat = new THREE.MeshPhongMaterial({
+    color: 0xcc9966, specular: 0x222222, shininess: 20,
+    flatShading: true, transparent: true, opacity: 0.92
+  });
+  const roofMat = new THREE.MeshPhongMaterial({
+    color: 0xddccaa, specular: 0x111111, shininess: 10,
+    flatShading: true
+  });
+  const treeMat = new THREE.MeshPhongMaterial({
+    color: 0x44aa44, specular: 0x112211, shininess: 5,
+    flatShading: false
+  });
+  const roadMat = new THREE.MeshPhongMaterial({
+    color: 0x555555, flatShading: true
+  });
+
+  let bldgCount = 0, treeCount = 0;
+
+  for (const inst of instances) {
+    if (inst.label === 'building') {
+      const h = (inst.height_m || 10) * ve;
+      const bbox = inst.bbox; // [x, y, w, h] in image pixels
+      if (!bbox || bbox[2] < 2 || bbox[3] < 2) continue;
+
+      // Use polygon if available, otherwise bbox
+      let shape;
+      if (inst.polygon && inst.polygon.length >= 3) {
+        shape = new THREE.Shape();
+        shape.moveTo(
+          inst.polygon[0][0] * scaleX + offsetX,
+          inst.polygon[0][1] * scaleZ + offsetZ
+        );
+        for (let i = 1; i < inst.polygon.length; i++) {
+          shape.lineTo(
+            inst.polygon[i][0] * scaleX + offsetX,
+            inst.polygon[i][1] * scaleZ + offsetZ
+          );
+        }
+        shape.closePath();
+      } else {
+        const x1 = bbox[0] * scaleX + offsetX;
+        const z1 = bbox[1] * scaleZ + offsetZ;
+        const x2 = (bbox[0] + bbox[2]) * scaleX + offsetX;
+        const z2 = (bbox[1] + bbox[3]) * scaleZ + offsetZ;
+        shape = new THREE.Shape();
+        shape.moveTo(x1, z1);
+        shape.lineTo(x2, z1);
+        shape.lineTo(x2, z2);
+        shape.lineTo(x1, z2);
+        shape.closePath();
+      }
+
+      const extrudeSettings = { depth: h, bevelEnabled: false };
+      const geo = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+      // Rotate so extrusion goes up (Y axis) instead of Z
+      geo.rotateX(-Math.PI / 2);
+
+      const bldgMesh = new THREE.Mesh(geo, bldgMat);
+      bldgMesh.userData = { type: 'building', instance: inst };
+      lod1Group.add(bldgMesh);
+      bldgCount++;
+    }
+    else if (inst.label === 'tree') {
+      const bbox = inst.bbox;
+      if (!bbox) continue;
+      const cx = (bbox[0] + bbox[2] / 2) * scaleX + offsetX;
+      const cz = (bbox[1] + bbox[3] / 2) * scaleZ + offsetZ;
+      const radius = Math.max(bbox[2], bbox[3]) * scaleX * 0.4;
+      const treeH = (inst.height_m || 8) * ve;
+
+      // Trunk
+      const trunkGeo = new THREE.CylinderGeometry(radius * 0.15, radius * 0.2, treeH * 0.4, 6);
+      const trunkMat = new THREE.MeshPhongMaterial({ color: 0x664422 });
+      const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+      trunk.position.set(cx, treeH * 0.2, cz);
+
+      // Canopy (sphere)
+      const canopyGeo = new THREE.SphereGeometry(radius, 8, 6);
+      const canopy = new THREE.Mesh(canopyGeo, treeMat);
+      canopy.position.set(cx, treeH * 0.6, cz);
+      canopy.scale.y = 0.7;
+
+      const treeGroup = new THREE.Group();
+      treeGroup.add(trunk);
+      treeGroup.add(canopy);
+      treeGroup.userData = { type: 'tree', instance: inst };
+      lod1Group.add(treeGroup);
+      treeCount++;
+    }
+    else if (inst.label === 'road') {
+      const bbox = inst.bbox;
+      if (!bbox) continue;
+      const x1 = bbox[0] * scaleX + offsetX;
+      const z1 = bbox[1] * scaleZ + offsetZ;
+      const rw = bbox[2] * scaleX;
+      const rh = bbox[3] * scaleZ;
+      const roadGeo = new THREE.PlaneGeometry(rw, rh);
+      roadGeo.rotateX(-Math.PI / 2);
+      const roadMesh = new THREE.Mesh(roadGeo, roadMat);
+      roadMesh.position.set(x1 + rw / 2, 0.1, z1 + rh / 2);
+      roadMesh.userData = { type: 'road', instance: inst };
+      lod1Group.add(roadMesh);
+    }
+  }
+
+  // Ground plane with source image texture
+  if (sourceImageUrl) {
+    const texLoader = new THREE.TextureLoader();
+    texLoader.load(sourceImageUrl, function(tex) {
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      const groundGeo = new THREE.PlaneGeometry(PLANE_SIZE, PLANE_SIZE);
+      groundGeo.rotateX(-Math.PI / 2);
+      const groundMat = new THREE.MeshPhongMaterial({
+        map: tex, side: THREE.DoubleSide, transparent: false
+      });
+      const groundMesh = new THREE.Mesh(groundGeo, groundMat);
+      groundMesh.position.y = 0;
+      groundMesh.userData = { type: 'ground' };
+      lod1Group.add(groundMesh);
+    });
+  }
+
+  scene.add(lod1Group);
+
+  // Hide heightfield mesh, show LOD1
+  mesh.visible = false;
+
+  // Add better lighting for LOD1
+  if (!scene.getObjectByName('lod1_dirlight')) {
+    const dirLight = new THREE.DirectionalLight(0xffeedd, 0.8);
+    dirLight.position.set(300, 500, 200);
+    dirLight.name = 'lod1_dirlight';
+    scene.add(dirLight);
+    const ambLight = new THREE.AmbientLight(0x334455, 0.5);
+    ambLight.name = 'lod1_amblight';
+    scene.add(ambLight);
+  }
+
+  console.log('[LOD1] Built scene: ' + bldgCount + ' buildings, ' + treeCount + ' trees');
+  return { buildings: bldgCount, trees: treeCount };
+}
+
+function clearLOD1() {
+  if (lod1Group) {
+    scene.remove(lod1Group);
+    lod1Group = null;
+  }
+  lod1Active = false;
+  lod1Instances = null;
+  mesh.visible = true;
+  // Remove LOD1 lights
+  const dl = scene.getObjectByName('lod1_dirlight');
+  const al = scene.getObjectByName('lod1_amblight');
+  if (dl) scene.remove(dl);
+  if (al) scene.remove(al);
+}
 
 // ─── Panel toggle + section collapse ────────────────────────────────────────
 const panelEl = document.getElementById('panel');
@@ -805,12 +997,39 @@ document.getElementById('btn-measure').addEventListener('click', () => {
 });
 
 renderer.domElement.addEventListener('mousemove', e => {
-  if (!currentFloatData || !currentMeta) { tooltip.style.display = 'none'; return; }
   if (cameraMode === 'fps') { tooltip.style.display = 'none'; return; }
-
   mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
   mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
   raycaster.setFromCamera(mouse, camera);
+
+  // LOD1 mode: raycast against LOD1 group for metric height
+  if (lod1Active && lod1Group) {
+    const hits = raycaster.intersectObjects(lod1Group.children, true);
+    if (hits.length > 0) {
+      const hit = hits[0];
+      const wp = hit.point;
+      const info = getLOD1HeightAtPoint(wp.x, wp.z);
+      if (info && info.height_m != null) {
+        let text = info.height_m.toFixed(1) + ' m';
+        if (info.uncertainty_m) text += ' ±' + info.uncertainty_m.toFixed(1);
+        if (info.confidence) text += ' [' + info.confidence + ']';
+        tooltip.textContent = text;
+      } else if (info) {
+        tooltip.textContent = info.label;
+      } else {
+        tooltip.textContent = 'ground';
+      }
+      tooltip.style.left = (e.clientX + 16) + 'px';
+      tooltip.style.top = (e.clientY - 10) + 'px';
+      tooltip.style.display = 'block';
+      return;
+    }
+    tooltip.style.display = 'none';
+    return;
+  }
+
+  // Heightfield mode: raycast against plane mesh
+  if (!currentFloatData || !currentMeta) { tooltip.style.display = 'none'; return; }
   const hits = raycaster.intersectObject(mesh);
   if (hits.length === 0) { tooltip.style.display = 'none'; return; }
 
@@ -1325,6 +1544,126 @@ function renderValidation(data) {
   scCtx.save(); scCtx.translate(10, sh / 2); scCtx.rotate(-Math.PI / 2);
   scCtx.fillText('Predicted', 0, 0); scCtx.restore();
   scCtx.fillText('Reference', sw / 2 - 20, sh - 4);
+}
+
+// ─── SAM Segment & Build 3D ─────────────────────────────────────────────────
+document.getElementById('sun-elev-slider').addEventListener('input', function() {
+  document.getElementById('sun-elev-val').textContent = this.value + '°';
+});
+document.getElementById('gsd-slider').addEventListener('input', function() {
+  document.getElementById('gsd-val').textContent = parseFloat(this.value).toFixed(2);
+});
+
+let lastUploadedFile = null;
+let lastSourceBlobUrl = null;
+
+// Keep track of the uploaded file for SAM pipeline
+const origFileInput = document.getElementById('file-input');
+origFileInput.addEventListener('change', function() {
+  if (this.files[0]) lastUploadedFile = this.files[0];
+});
+
+document.getElementById('btn-segment').addEventListener('click', async () => {
+  const file = lastUploadedFile || document.getElementById('file-input').files[0];
+  if (!file) {
+    document.getElementById('status').textContent = 'Upload an image first, then click Segment & Build 3D.';
+    return;
+  }
+
+  const status = document.getElementById('status');
+  status.textContent = 'Running SAM segmentation + height estimation… (this takes ~60s on CPU)';
+
+  // Show sun/gsd controls
+  document.getElementById('sun-row').style.display = '';
+  document.getElementById('gsd-row').style.display = '';
+
+  const gsd = parseFloat(document.getElementById('gsd-slider').value) || 0.5;
+  const sunElev = parseFloat(document.getElementById('sun-elev-slider').value) || 45;
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const resp = await fetch(
+      '/estimate-heights?gsd=' + gsd + '&sun_elevation=' + sunElev + '&sun_azimuth=180',
+      { method: 'POST', body: formData }
+    );
+    if (resp.status === 503) {
+      const err = await resp.json().catch(() => ({}));
+      status.textContent = err.detail || 'SAM still loading — try again shortly.';
+      return;
+    }
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => null);
+      status.textContent = (err && err.detail) ? err.detail : 'Error: ' + resp.status;
+      return;
+    }
+
+    const data = await resp.json();
+    console.log('[SAM] Response:', data);
+
+    // Create blob URL for source image texture
+    if (lastSourceBlobUrl) URL.revokeObjectURL(lastSourceBlobUrl);
+    lastSourceBlobUrl = URL.createObjectURL(file);
+
+    const result = buildLOD1Scene(data, lastSourceBlobUrl);
+
+    // Update stats
+    const sr = document.getElementById('stats-readout');
+    const cov = data.coverage || {};
+    const hs = data.height_stats || {};
+    sr.innerHTML =
+      '<span class="sv">' + (cov.total_buildings || 0) + '</span> buildings' +
+      ' · <span class="sv">' + (cov.coverage_pct || 0) + '%</span> with heights' +
+      (hs.mean_m ? ' · mean <span class="sv">' + hs.mean_m.toFixed(1) + ' m</span>' : '') +
+      (data.timing ? ' · <span class="sv">' + data.timing.total + 's</span>' : '');
+    sr.style.display = 'block';
+
+    const sunInfo = data.sun || {};
+    status.textContent =
+      'LOD1: ' + result.buildings + ' buildings, ' + result.trees + ' trees' +
+      ' · Sun: ' + sunInfo.elevation_deg + '° elev, ' + sunInfo.source +
+      ' · Coverage: ' + (cov.coverage_pct || 0) + '%' +
+      (data.segmentation_time_s ? ' · SAM: ' + data.segmentation_time_s + 's' : '');
+
+    // Store instance data for height readout
+    lod1Instances = data.instances;
+
+  } catch (e) {
+    status.textContent = 'Segment error: ' + e.message;
+    console.error(e);
+  }
+});
+
+// ─── LOD1 Height Readout ────────────────────────────────────────────────────
+// Override the mousemove tooltip for LOD1 mode to show metric heights
+function getLOD1HeightAtPoint(worldX, worldZ) {
+  if (!lod1Instances) return null;
+  // Convert world coords back to image pixels
+  const imgX = (worldX + PLANE_SIZE / 2) / PLANE_SIZE * 512;
+  const imgY = (worldZ + PLANE_SIZE / 2) / PLANE_SIZE * 512;
+
+  for (const inst of lod1Instances) {
+    if (inst.label !== 'building' || !inst.bbox) continue;
+    const [bx, by, bw, bh] = inst.bbox;
+    if (imgX >= bx && imgX <= bx + bw && imgY >= by && imgY <= by + bh) {
+      return {
+        height_m: inst.height_m,
+        confidence: inst.height_confidence,
+        uncertainty_m: inst.height_uncertainty_m,
+        label: inst.label,
+      };
+    }
+  }
+  // Check trees
+  for (const inst of lod1Instances) {
+    if (inst.label !== 'tree' || !inst.bbox) continue;
+    const [bx, by, bw, bh] = inst.bbox;
+    if (imgX >= bx && imgX <= bx + bw && imgY >= by && imgY <= by + bh) {
+      return { height_m: null, label: 'tree' };
+    }
+  }
+  return { height_m: null, label: 'ground' };
 }
 
 // ─── Resize + render loop ───────────────────────────────────────────────────
