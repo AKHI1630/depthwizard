@@ -14,7 +14,7 @@ from typing import Literal
 
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .calibration import (
@@ -590,6 +590,11 @@ async def flood_endpoint(
         "aggregate": result.aggregate,
         "buildings": result.buildings,
     })
+
+
+@app.get("/", include_in_schema=False)
+async def root_redirect():
+    return RedirectResponse(url="/landing.html")
 
 
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

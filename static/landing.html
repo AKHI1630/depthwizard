@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DepthWizard — SIH 26175</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    color: #c8d8e8;
+    font-family: system-ui, -apple-system, sans-serif;
+    overflow: hidden;
+    width: 100vw; height: 100vh;
+  }
+  #landing-canvas { width: 100vw; height: 100vh; display: block; }
+
+  #overlay {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    pointer-events: none; z-index: 10;
+  }
+
+  .title-group { text-align: center; pointer-events: auto; }
+  .title-group h1 {
+    font-size: 42px; font-weight: 700; letter-spacing: 0.06em;
+    color: #e8f0ff;
+    text-shadow: 0 0 40px rgba(126,200,227,0.3);
+    margin-bottom: 8px;
+  }
+  .title-group .method-line {
+    font-size: 14px; color: #7ec8e3; letter-spacing: 0.08em;
+    font-weight: 400; margin-bottom: 6px;
+  }
+  .title-group .badge {
+    display: inline-block;
+    padding: 4px 14px;
+    border: 1px solid rgba(126,200,227,0.3);
+    border-radius: 3px;
+    font-size: 11px; letter-spacing: 0.12em;
+    color: #8aa8c8; margin-bottom: 24px;
+  }
+
+  #btn-launch {
+    pointer-events: auto;
+    background: rgba(126,200,227,0.15);
+    border: 1px solid rgba(126,200,227,0.4);
+    color: #c8e8ff; font-size: 16px; font-weight: 500;
+    padding: 12px 40px; border-radius: 4px;
+    cursor: pointer; letter-spacing: 0.06em;
+    transition: background 0.3s, border-color 0.3s, transform 0.2s;
+  }
+  #btn-launch:hover {
+    background: rgba(126,200,227,0.25);
+    border-color: rgba(126,200,227,0.6);
+    transform: scale(1.03);
+  }
+
+  .footer {
+    position: fixed; bottom: 16px; left: 0; width: 100%;
+    text-align: center; font-size: 10px; color: #4a5a6a;
+    letter-spacing: 0.06em; pointer-events: none;
+  }
+  .footer a { color: #5a7a9a; text-decoration: none; }
+
+  #fade-out {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: #000; opacity: 0; pointer-events: none;
+    transition: opacity 1.2s ease;
+    z-index: 100;
+  }
+  #fade-out.active { opacity: 1; pointer-events: all; }
+</style>
+</head>
+<body>
+<div id="landing-canvas"></div>
+
+<div id="overlay">
+  <div class="title-group">
+    <h1>DEPTHWIZARD</h1>
+    <div class="method-line">Shadow-Based Photogrammetric Height Estimation</div>
+    <div class="badge">SIH 26175 · Smart India Hackathon</div>
+    <br>
+    <button id="btn-launch">LAUNCH WORKSPACE</button>
+  </div>
+</div>
+
+<div class="footer">
+  Powered by Depth Anything V2 · Segment Anything · pysolar
+  <br>
+  <span style="color:#3a4a5a;">Single-view metric height from satellite imagery</span>
+</div>
+
+<div id="fade-out"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+// Skip landing page if ?fast=1
+if (new URLSearchParams(window.location.search).get('fast') === '1') {
+  window.location.href = '/index.html';
+}
+
+const container = document.getElementById('landing-canvas');
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+container.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.set(0, 0, 4);
+
+// Starfield
+const starGeo = new THREE.BufferGeometry();
+const starCount = 2000;
+const starPos = new Float32Array(starCount * 3);
+for (let i = 0; i < starCount * 3; i++) {
+  starPos[i] = (Math.random() - 0.5) * 200;
+}
+starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+const starMat = new THREE.PointsMaterial({ color: 0xaaccff, size: 0.15, sizeAttenuation: true });
+const stars = new THREE.Points(starGeo, starMat);
+scene.add(stars);
+
+// Earth
+const earthGeo = new THREE.SphereGeometry(1, 64, 48);
+const earthTexLoader = new THREE.TextureLoader();
+let earthMesh;
+
+// Try loading the NASA Blue Marble texture
+earthTexLoader.load(
+  '/assets/earth_2k.jpg',
+  function(texture) {
+    const earthMat = new THREE.MeshPhongMaterial({
+      map: texture,
+      shininess: 15,
+      specular: new THREE.Color(0x222244),
+    });
+    earthMesh = new THREE.Mesh(earthGeo, earthMat);
+    scene.add(earthMesh);
+  },
+  undefined,
+  function() {
+    // Fallback: solid blue-green sphere
+    const earthMat = new THREE.MeshPhongMaterial({
+      color: 0x2244aa,
+      shininess: 20,
+      specular: new THREE.Color(0x222244),
+    });
+    earthMesh = new THREE.Mesh(earthGeo, earthMat);
+    scene.add(earthMesh);
+  }
+);
+
+// Atmospheric rim glow
+const atmosGeo = new THREE.SphereGeometry(1.03, 64, 48);
+const atmosMat = new THREE.ShaderMaterial({
+  uniforms: {},
+  vertexShader: `
+    varying vec3 vNormal;
+    varying vec3 vPosition;
+    void main() {
+      vNormal = normalize(normalMatrix * normal);
+      vPosition = (modelViewMatrix * vec4(position, 1.0)).xyz;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vNormal;
+    varying vec3 vPosition;
+    void main() {
+      vec3 viewDir = normalize(-vPosition);
+      float fresnel = 1.0 - dot(viewDir, vNormal);
+      fresnel = pow(fresnel, 3.0);
+      gl_FragColor = vec4(0.4, 0.7, 1.0, fresnel * 0.6);
+    }
+  `,
+  transparent: true,
+  side: THREE.BackSide,
+  depthWrite: false,
+});
+const atmosMesh = new THREE.Mesh(atmosGeo, atmosMat);
+scene.add(atmosMesh);
+
+// Satellite on orbit
+const satGroup = new THREE.Group();
+// Bus
+const busGeo = new THREE.BoxGeometry(0.04, 0.03, 0.06);
+const busMat = new THREE.MeshPhongMaterial({ color: 0xcccccc, flatShading: true });
+const bus = new THREE.Mesh(busGeo, busMat);
+satGroup.add(bus);
+// Solar panels
+const panelGeo = new THREE.BoxGeometry(0.12, 0.002, 0.04);
+const panelMat = new THREE.MeshPhongMaterial({ color: 0x223366, flatShading: true });
+const panelL = new THREE.Mesh(panelGeo, panelMat);
+panelL.position.x = -0.08;
+const panelR = new THREE.Mesh(panelGeo, panelMat);
+panelR.position.x = 0.08;
+satGroup.add(panelL, panelR);
+// Orbit ring (visual indicator)
+const orbitRingGeo = new THREE.RingGeometry(1.45, 1.46, 64);
+const orbitRingMat = new THREE.MeshBasicMaterial({
+  color: 0x334466, side: THREE.DoubleSide, transparent: true, opacity: 0.3
+});
+const orbitRing = new THREE.Mesh(orbitRingGeo, orbitRingMat);
+orbitRing.rotation.x = Math.PI / 2 + 0.3;
+scene.add(orbitRing);
+
+scene.add(satGroup);
+
+// Lighting
+const sunLight = new THREE.DirectionalLight(0xffffee, 1.2);
+sunLight.position.set(5, 2, 3);
+scene.add(sunLight);
+const ambLight = new THREE.AmbientLight(0x112233, 0.4);
+scene.add(ambLight);
+
+// Parallax on pointer
+let mouseX = 0, mouseY = 0;
+document.addEventListener('mousemove', e => {
+  mouseX = (e.clientX / window.innerWidth - 0.5) * 0.3;
+  mouseY = (e.clientY / window.innerHeight - 0.5) * 0.3;
+});
+
+// Animation loop
+let t = 0;
+let transitioning = false;
+let transitionStart = 0;
+const TRANSITION_DURATION = 2.5; // seconds
+
+function animate() {
+  requestAnimationFrame(animate);
+  t += 0.005;
+
+  // Earth rotation
+  if (earthMesh) {
+    earthMesh.rotation.y = t * 0.2;
+  }
+  atmosMesh.rotation.y = t * 0.2;
+
+  // Satellite orbit
+  const orbitR = 1.45;
+  const orbitSpeed = t * 0.8;
+  const orbitTilt = 0.3;
+  satGroup.position.x = Math.cos(orbitSpeed) * orbitR;
+  satGroup.position.z = Math.sin(orbitSpeed) * orbitR * Math.cos(orbitTilt);
+  satGroup.position.y = Math.sin(orbitSpeed) * orbitR * Math.sin(orbitTilt);
+  satGroup.lookAt(0, 0, 0);
+
+  // Subtle camera parallax
+  if (!transitioning) {
+    camera.position.x = mouseX * 0.5;
+    camera.position.y = mouseY * 0.3;
+    camera.lookAt(0, 0, 0);
+  }
+
+  // Zoom transition
+  if (transitioning) {
+    const elapsed = (performance.now() / 1000) - transitionStart;
+    const progress = Math.min(elapsed / TRANSITION_DURATION, 1.0);
+    const ease = progress * progress * (3 - 2 * progress); // smoothstep
+
+    // Camera zooms toward Earth
+    camera.position.z = 4 - ease * 3.5;
+    camera.position.x = mouseX * 0.5 * (1 - ease);
+    camera.position.y = mouseY * 0.3 * (1 - ease);
+    camera.lookAt(0, 0, 0);
+
+    // Fade to black at 60%
+    if (progress > 0.6) {
+      const fadeProgress = (progress - 0.6) / 0.4;
+      document.getElementById('fade-out').style.opacity = fadeProgress;
+    }
+
+    // Navigate to workspace at end
+    if (progress >= 1.0) {
+      window.location.href = '/index.html';
+      return;
+    }
+  }
+
+  // Stars subtle drift
+  stars.rotation.y = t * 0.01;
+  stars.rotation.x = t * 0.005;
+
+  renderer.render(scene, camera);
+}
+animate();
+
+// Launch button
+document.getElementById('btn-launch').addEventListener('click', () => {
+  transitioning = true;
+  transitionStart = performance.now() / 1000;
+  document.getElementById('overlay').style.opacity = '0';
+  document.getElementById('overlay').style.transition = 'opacity 0.8s';
+  document.getElementById('overlay').style.pointerEvents = 'none';
+  document.getElementById('fade-out').classList.add('active');
+});
+
+// Resize
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>

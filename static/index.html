@@ -399,6 +399,9 @@
 const GRID = 512, PLANE_SIZE = 900;
 const DEFAULT_CAM = { pos: [350, 500, 350], target: [0, 0, 0] };
 
+// Building-rise animation flag — set when arriving from landing page
+window._animateBuildingRise = document.referrer.includes('landing');
+
 // ─── Viridis & Cividis LUTs (64 stops) ─────────────────────────────────────
 const VIRIDIS = [
   [0.267,0.004,0.329],[0.281,0.085,0.415],[0.278,0.140,0.457],[0.269,0.190,0.488],
@@ -802,6 +805,30 @@ function buildLOD1Scene(data, sourceImageUrl) {
   }
 
   console.log('[LOD1] Built scene: ' + bldgCount + ' buildings, ' + treeCount + ' trees');
+
+  // Building-rise animation: scale Y from 0 → 1 over 1.2s with stagger
+  if (window._animateBuildingRise) {
+    const meshes = [];
+    lod1Group.traverse(child => {
+      if (child.isMesh && child.userData.type === 'building') meshes.push(child);
+    });
+    meshes.forEach((m, i) => {
+      m.scale.y = 0.01;
+      const delay = i * 40;
+      const dur = 800;
+      const start = performance.now() + delay;
+      function riseStep(now) {
+        const t = Math.min((now - start) / dur, 1);
+        if (t < 0) { requestAnimationFrame(riseStep); return; }
+        const ease = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+        m.scale.y = Math.max(0.01, ease);
+        if (t < 1) requestAnimationFrame(riseStep);
+      }
+      requestAnimationFrame(riseStep);
+    });
+    window._animateBuildingRise = false;
+  }
+
   return { buildings: bldgCount, trees: treeCount };
 }
 
