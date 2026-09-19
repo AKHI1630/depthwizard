@@ -123,6 +123,24 @@ def get_mask_generator(points_per_side: int = 12, min_mask_region_area: int = 30
     return _mask_generator
 
 
+def unload_sam_model() -> None:
+    """Release SAM RAM after segmentation so Depth Anything can load on Render Free."""
+    global _sam_model, _mask_generator, _generator_params
+    _mask_generator = None
+    _generator_params = {}
+    _sam_model = None
+    try:
+        import gc
+        import torch
+        gc.collect()
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+    import gc
+    gc.collect()
+    logger.info("SAM model unloaded to release memory.")
+
+
 def split_large_masks(sam_masks: list, image_rgb: np.ndarray, area_factor: float = 3.0) -> list:
     """Split oversized masks using watershed with distance-transform markers."""
     if len(sam_masks) < 3:
