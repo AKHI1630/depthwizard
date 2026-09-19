@@ -88,25 +88,18 @@ def _load_models() -> None:
         _da_error = str(exc)
         logger.warning("Depth Anything V2 failed to load: %s", exc)
 
-    # Secondary: MiDaS (torch.hub)
-    try:
-        from .estimators.midas import MidasEstimator
-        _midas = MidasEstimator()
-        logger.info("MiDaS_small loaded successfully.")
-    except Exception as exc:
-        logger.warning("MiDaS failed to load: %s", exc)
-
-    if _depth_anything or _midas:
+    # MiDaS is kept in the repository as an optional fallback,
+    # but is intentionally not loaded in the deployment.
+    if _depth_anything:
         _model_status = ModelStatus.READY
-        primary = "Depth-Anything-V2" if _depth_anything else "MiDaS_small"
         logger.info("=" * 60)
-        logger.info("DepthWizard ready — %s loaded, accepting requests.", primary)
+        logger.info("DepthWizard ready — Depth-Anything-V2 loaded, accepting requests.")
         logger.info("=" * 60)
     else:
         _model_status = ModelStatus.FAILED
-        _model_error = f"All models failed. DA: {_da_error}"
+        _model_error = f"Depth Anything V2 failed. DA: {_da_error}"
         logger.error("=" * 60)
-        logger.error("All depth models failed — only synthetic available.")
+        logger.error("Depth Anything V2 failed — only synthetic available.")
         logger.error("=" * 60)
 
 
