@@ -1,20 +1,21 @@
 """Download model weights at container startup.
 
-HF Spaces can reach huggingface.co even though the dev laptop cannot.
-Weights are cached in HF_HOME (default ~/.cache/huggingface) across restarts.
+Weights are cached in the container's Hugging Face/local model directory.
 """
-import os
-import sys
 import urllib.request
 from pathlib import Path
 
 MODELS_DIR = Path("models")
 
+# Transformers-compatible Depth Anything V2 Small repository.
+# The original depth-anything/Depth-Anything-V2-Small repo contains the
+# native .pth checkpoint, while this app loads the Transformers format
+# (config.json + model.safetensors + preprocessor_config.json).
 DA_V2_DIR = MODELS_DIR / "depth-anything-v2-small"
 DA_V2_FILES = {
-    "config.json": "https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/config.json",
-    "model.safetensors": "https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/model.safetensors",
-    "preprocessor_config.json": "https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/preprocessor_config.json",
+    "config.json": "https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf/resolve/main/config.json",
+    "model.safetensors": "https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf/resolve/main/model.safetensors",
+    "preprocessor_config.json": "https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf/resolve/main/preprocessor_config.json",
 }
 
 SAM_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
