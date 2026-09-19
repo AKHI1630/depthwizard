@@ -146,13 +146,97 @@ def estimate_heights(
     sun_log.measured_coherence_R = measured_sun.coherence_R
     sun_log.measured_n_pairs = measured_sun.n_shadow_pairs
 
+    # Priority 3 gate: measured azimuth wins ONLY if BOTH conditions hold:
+    #   (a) coherence R >= 0.5  (not random noise)
+    #   (b) delta to any higher-priority azimuth <= 20 deg  (not a consistent artefact)
+    # High R on a wrong direction (e.g. R=0.85 but delta=132 deg) is a coherent
+    # artefact, not real shadows — must not override computed/metadata.
+    measured_usable = False
+    measured_reject_reason = None
+    measured_delta_to_ref = None
+    if measured_sun.source != "default" and measured_sun.coherence_R is not None:
+        R = measured_sun.coherence_R
+
+        # Always find the reference azimuth and compute delta (needed for
+        # both the standard gate and the borderline combined test).
+        ref_az = None
+        ref_src = None
+        if sun_log.metadata:
+            ref_az = sun_log.metadata["azimuth"]
+            ref_src = "metadata"
+        elif sun_log.computed:
+            ref_az = sun_log.computed["azimuth"]
+            ref_src = "computed"
+        elif sun is not None:
+            ref_az = sun.azimuth_deg
+            ref_src = "user"
+
+        if ref_az is not None:
+            delta = abs(measured_sun.azimuth_deg - ref_az)
+            if delta > 180:
+                delta = 360 - delta
+            measured_delta_to_ref = delta
+
+        if R < 0.5:
+            measured_reject_reason = f"R={R:.2f} < 0.5"
+        elif measured_delta_to_ref is not None and measured_delta_to_ref > 20:
+            measured_reject_reason = (
+                f"R={R:.2f} OK but measured az={measured_sun.azimuth_deg:.1f} vs "
+                f"{ref_src}={ref_az:.1f} (delta={measured_delta_to_ref:.1f} > 20 deg)"
+            )
+        elif measured_delta_to_ref is not None:
+            measured_usable = True
+        else:
+            measured_usable = True
+
+    if measured_reject_reason:
+        logger.warning("Measured shadow azimuth REJECTED: %s", measured_reject_reason)
+    elif measured_usable:
+        logger.info("Measured shadow azimuth ACCEPTED: az=%.1f R=%.2f",
+                     measured_sun.azimuth_deg, measured_sun.coherence_R or 0)
+
+    # Elevation inheritance: shadow measurement gives azimuth only, never
+    # elevation. If measured azimuth wins, inherit elevation from the best
+    # available source — never fall back to a 45 deg default.
+    best_elevation = None
+    best_elev_src = None
+    if sun_log.metadata:
+        best_elevation = sun_log.metadata["elevation"]
+        best_elev_src = "metadata"
+    elif sun_log.computed:
+        best_elevation = sun_log.computed["elevation"]
+        best_elev_src = "computed"
+    elif sun is not None:
+        best_elevation = sun.elevation_deg
+        best_elev_src = "user"
+
     if resolved_sun is None:
-        if measured_sun.source != "default":
-            resolved_sun = measured_sun
+        if measured_usable:
+            elev = best_elevation if best_elevation is not None else 45.0
+            resolved_sun = SunPosition(
+                elevation_deg=elev,
+                azimuth_deg=measured_sun.azimuth_deg,
+                source="estimated",
+                confidence=measured_sun.confidence,
+                coherence_R=measured_sun.coherence_R,
+                n_shadow_pairs=measured_sun.n_shadow_pairs,
+            )
+            if best_elevation is not None:
+                logger.info("Sun: measured az=%.1f + %s elevation=%.1f",
+                            measured_sun.azimuth_deg, best_elev_src, elev)
+            else:
+                logger.warning("Sun: measured az=%.1f but NO elevation source — using 45 deg default",
+                               measured_sun.azimuth_deg)
         elif sun is not None:
             resolved_sun = sun
+            logger.info("Sun resolved from user slider (measured rejected: %s)",
+                        measured_reject_reason or "no valid pairs")
         else:
-            resolved_sun = measured_sun  # fallback default
+            resolved_sun = SunPosition(
+                elevation_deg=45.0, azimuth_deg=180.0,
+                source="default", confidence="low",
+            )
+            logger.warning("No usable sun source — using default 45 deg / 180 deg")
 
     # Cross-check: compare independent azimuth sources pairwise.
     # Collect all available azimuths with their provenance.
@@ -203,14 +287,77 @@ def estimate_heights(
     t_height = time.perf_counter()
     image_center = (image_rgb.shape[1] / 2.0, image_rgb.shape[0] / 2.0)
 
-    # Quality gate: shadow coherence R < 0.5 means shadow directions are
-    # nearly random — shadow lengths are unreliable for metric heights.
+    # Shadow feasibility pre-check: at high sun elevation, shadows are too
+    # short to measure. h_min = min_offset_px * gsd * tan(elevation).
+    shadow_feasibility = None
+    if resolved_sun.elevation_deg > 0:
+        from .shadow_detection import MIN_OFFSET_PX
+        h_min = MIN_OFFSET_PX * gsd_m * np.tan(np.radians(resolved_sun.elevation_deg))
+        shadow_feasibility = {
+            "h_min_m": round(h_min, 1),
+            "sun_elevation_deg": round(resolved_sun.elevation_deg, 1),
+            "gsd_m": gsd_m,
+            "min_offset_px": MIN_OFFSET_PX,
+        }
+        if resolved_sun.elevation_deg > 60:
+            logger.warning(
+                "Sun elevation %.1f° > 60° — shadows are very short. "
+                "Minimum measurable building height: %.1f m at %.2f m GSD. "
+                "Imagery may be unsuitable for shadow photogrammetry.",
+                resolved_sun.elevation_deg, h_min, gsd_m,
+            )
+            shadow_feasibility["warning"] = (
+                f"Sun elevation {resolved_sun.elevation_deg:.0f}° is too high for reliable "
+                f"shadow photogrammetry. Buildings shorter than {h_min:.1f} m cannot be measured."
+            )
+        else:
+            logger.info(
+                "Shadow feasibility: h_min=%.1f m at %.1f° sun, %.2f m GSD",
+                h_min, resolved_sun.elevation_deg, gsd_m,
+            )
+
+    # Quality gate — two tiers:
+    #
+    # STANDARD:   R_weighted >= 0.5              -> "measured"
+    # BORDERLINE: p_combined < 0.01 AND delta <= 10 deg  -> "measured (borderline)"
+    #
+    # Combined Rayleigh-Azimuth test.  Under H0 (uniform random shadow
+    # directions), the mean resultant length R and the circular mean
+    # direction are independent.  Their p-values multiply:
+    #   p_R     = exp(-n * R^2)        Rayleigh test for non-uniformity
+    #   p_delta = 2 * delta / 360      prob mean falls within delta of ref
+    #   p_combined = p_R * p_delta
+    # The delta <= 10 deg hard gate prevents high-n artefacts (coherent
+    # but wrong direction) from sneaking through on p_R alone.
     shadow_coherence_R = measured_sun.coherence_R
+    shadow_n_pairs = measured_sun.n_shadow_pairs
     shadow_reliable = shadow_coherence_R is not None and shadow_coherence_R >= 0.5
-    if not shadow_reliable:
+    shadow_borderline = False
+    shadow_p_combined = None
+
+    if (not shadow_reliable
+            and shadow_coherence_R is not None
+            and shadow_n_pairs is not None
+            and shadow_n_pairs >= 3
+            and measured_delta_to_ref is not None):
+        import math as _math
+        p_R = _math.exp(-shadow_n_pairs * shadow_coherence_R ** 2)
+        p_delta = min(1.0, 2.0 * measured_delta_to_ref / 360.0)
+        shadow_p_combined = p_R * p_delta
+        if shadow_p_combined < 0.01 and measured_delta_to_ref <= 10.0:
+            shadow_borderline = True
+            logger.info(
+                "Shadow coherence BORDERLINE: R=%.3f, delta=%.1f deg, "
+                "n=%d, p_combined=%.6f < 0.01 — physically consistent, "
+                "coherence marginal",
+                shadow_coherence_R, measured_delta_to_ref,
+                shadow_n_pairs, shadow_p_combined,
+            )
+
+    if not shadow_reliable and not shadow_borderline:
         R_str = f"{shadow_coherence_R:.2f}" if shadow_coherence_R is not None else "N/A"
         logger.warning(
-            "Shadow coherence R=%s < 0.5 — shadow detection unreliable for this image. "
+            "Shadow coherence R=%s — shadow detection unreliable for this image. "
             "Shadow-derived heights will be labelled RELATIVE, not metric.",
             R_str,
         )
@@ -234,15 +381,17 @@ def estimate_heights(
                 if shadow_reliable:
                     inst.height_confidence = "high" if resolved_sun.confidence == "high" else "medium"
                     inst.height_source = "measured"
+                elif shadow_borderline:
+                    inst.height_confidence = "borderline"
+                    inst.height_source = "measured"
                 else:
                     inst.height_confidence = "low"
                     inst.height_source = "relative"
                 inst.height_methods = ["shadow"]
 
         # Phase D: DAv2 calibration using shadow anchors
-        # Only calibrate against shadow heights if shadows are reliable
         dav2_calibration = None
-        if depth_array is not None and shadow_reliable:
+        if depth_array is not None and (shadow_reliable or shadow_borderline):
             dav2_calibration = calibrate_depth_to_height(building_instances, depth_array)
 
         # Phase B/C/D/E: additional methods per building
@@ -256,7 +405,9 @@ def estimate_heights(
                     uncertainty_m=inst.height_uncertainty_m or 1.0,
                     method="shadow",
                 )
-                if not shadow_reliable:
+                if shadow_borderline:
+                    shadow_est.uncertainty_m = max(shadow_est.uncertainty_m, inst.height_m * 0.3)
+                elif not shadow_reliable:
                     shadow_est.uncertainty_m = max(shadow_est.uncertainty_m, inst.height_m * 0.5)
                 estimates.append(shadow_est)
 
@@ -291,9 +442,12 @@ def estimate_heights(
                     inst.height_m = round(fused.height_m, 2)
                     inst.height_uncertainty_m = round(fused.uncertainty_m, 2)
                     inst.height_methods = fused.methods
-                    if not shadow_reliable:
+                    if not shadow_reliable and not shadow_borderline:
                         inst.height_source = "relative"
                         inst.height_confidence = "low"
+                    elif shadow_borderline:
+                        inst.height_source = fused.source
+                        inst.height_confidence = "borderline"
                     else:
                         inst.height_source = fused.source
                         if fused.low_confidence_flag:
@@ -326,24 +480,49 @@ def estimate_heights(
 
     # 4. Honest coverage stats
     total_bldg = len(building_instances)
-    directly_measured = sum(1 for i in building_instances if i.height_source == "measured")
+    directly_measured = sum(1 for i in building_instances
+                           if i.height_source == "measured" and i.height_confidence != "borderline")
+    borderline_measured = sum(1 for i in building_instances
+                             if i.height_source == "measured" and i.height_confidence == "borderline")
     relative_only = sum(1 for i in building_instances if i.height_source == "relative")
     inferred = sum(1 for i in building_instances if i.height_source == "inferred")
     failed = sum(1 for i in building_instances if i.height_m is None)
 
+    building_areas = sorted([i.area for i in building_instances])
+    area_hist = None
+    if building_areas:
+        pcts = np.percentile(building_areas, [10, 25, 50, 75, 90])
+        area_hist = {
+            "p10": int(pcts[0]), "p25": int(pcts[1]), "p50": int(pcts[2]),
+            "p75": int(pcts[3]), "p90": int(pcts[4]),
+            "min": building_areas[0], "max": building_areas[-1],
+        }
+
     coverage = {
         "total_buildings": total_bldg,
         "directly_measured": directly_measured,
+        "borderline": borderline_measured,
         "relative": relative_only,
         "inferred": inferred,
         "failed": failed,
         "shadow_coherence_R": round(float(shadow_coherence_R), 3) if shadow_coherence_R is not None else None,
         "shadow_reliable": shadow_reliable,
+        "shadow_borderline": shadow_borderline,
+        "shadow_p_combined": round(shadow_p_combined, 6) if shadow_p_combined is not None else None,
+        "area_histogram_px": area_hist,
+        "shadow_feasibility": shadow_feasibility,
     }
 
     if shadow_reliable:
         logger.info("Height coverage: %d/%d measured, %d inferred, %d failed (R=%.2f, shadows reliable)",
                      directly_measured, total_bldg, inferred, failed, shadow_coherence_R or 0)
+    elif shadow_borderline:
+        logger.info(
+            "Height coverage: %d/%d borderline measured, %d inferred, %d failed "
+            "(R=%.3f, p_combined=%.6f, shadows borderline)",
+            borderline_measured, total_bldg, inferred, failed,
+            shadow_coherence_R or 0, shadow_p_combined or 0,
+        )
     else:
         logger.warning(
             "Height coverage: %d relative, %d inferred, %d failed of %d buildings — "

@@ -54,8 +54,9 @@ def sun_from_datetime(
     elevation = get_altitude(lat, lon, dt)
     azimuth = get_azimuth(lat, lon, dt)
 
-    # pysolar azimuth: 0=S, positive=W; convert to geographic: 0=N, 90=E
-    geo_azimuth = (azimuth + 180) % 360
+    # pysolar get_azimuth already returns compass bearing: N=0, E=90, S=180, W=270
+    # Verified against hand-checkable case: equinox noon at 28N returns ~180 (due south).
+    geo_azimuth = azimuth % 360
 
     logger.info(
         "Sun position from pysolar: elevation=%.1f°, azimuth=%.1f° (geo) "
@@ -205,7 +206,7 @@ def estimate_sun_from_shadows(
     building_masks: list[np.ndarray],
     shadow_masks: list[np.ndarray],
     building_shadow_pairs: list[tuple[int, int]],
-    min_offset_px: float = 5.0,
+    min_offset_px: float = 5.0,  # must match shadow_detection.MIN_OFFSET_PX
 ) -> SunPosition:
     """
     Estimate sun azimuth from shadow directions across multiple buildings.
@@ -215,10 +216,25 @@ def estimate_sun_from_shadows(
     Pairs where the building-shadow centroid offset is below min_offset_px
     are rejected (sub-pixel offsets produce random bearings).
     """
+    # Deduplicate: keep only the LARGEST shadow per building.
+    # Multiple dark blobs matching one building is noise, not shadow.
+    best_per_building: dict[int, tuple[int, int]] = {}  # bldg_idx -> (shadow_idx, area)
+    for bldg_idx, shadow_idx in building_shadow_pairs:
+        shadow_mask = shadow_masks[shadow_idx]
+        area = int(shadow_mask.sum())
+        if bldg_idx not in best_per_building or area > best_per_building[bldg_idx][1]:
+            best_per_building[bldg_idx] = (shadow_idx, area)
+
+    dedup_pairs = [(bldg_idx, sinfo[0]) for bldg_idx, sinfo in best_per_building.items()]
+    if len(dedup_pairs) < len(building_shadow_pairs):
+        logger.info("Sun estimation: deduplicated %d pairs -> %d (1 shadow per building)",
+                     len(building_shadow_pairs), len(dedup_pairs))
+
     azimuths = []
+    offsets = []
     rejected = 0
 
-    for bldg_idx, shadow_idx in building_shadow_pairs:
+    for bldg_idx, shadow_idx in dedup_pairs:
         bldg_mask = building_masks[bldg_idx]
         shadow_mask = shadow_masks[shadow_idx]
 
@@ -242,6 +258,7 @@ def estimate_sun_from_shadows(
         shadow_azimuth = np.degrees(np.arctan2(dx, -dy)) % 360
         sun_azimuth = (shadow_azimuth + 180) % 360
         azimuths.append(sun_azimuth)
+        offsets.append(offset)
 
     if rejected > 0:
         logger.info("Sun estimation: rejected %d/%d pairs with centroid offset < %.0fpx",
@@ -257,16 +274,32 @@ def estimate_sun_from_shadows(
         )
 
     az_rad = np.radians(azimuths)
-    mean_sin = np.mean(np.sin(az_rad))
-    mean_cos = np.mean(np.cos(az_rad))
-    mean_azimuth = np.degrees(np.arctan2(mean_sin, mean_cos)) % 360
+    offsets_arr = np.array(offsets)
 
+    # Offset^2-weighted R: angular uncertainty of a centroid vector
+    # scales as ~1/offset, so weight ~ offset^2 is proportional to
+    # directional precision. Long shadows dominate; short noisy ones
+    # contribute little.
+    w = offsets_arr ** 2
+    w_sum = w.sum()
+    mean_sin = np.sum(w * np.sin(az_rad)) / w_sum
+    mean_cos = np.sum(w * np.cos(az_rad)) / w_sum
+    mean_azimuth = np.degrees(np.arctan2(mean_sin, mean_cos)) % 360
     R = np.sqrt(mean_sin**2 + mean_cos**2)
+
+    # Also compute unweighted R for diagnostics
+    uw_sin = np.mean(np.sin(az_rad))
+    uw_cos = np.mean(np.cos(az_rad))
+    R_unweighted = np.sqrt(uw_sin**2 + uw_cos**2)
+
     confidence = "medium" if R > 0.7 else "low"
 
     logger.info(
-        "Estimated sun azimuth: %.1f° from %d pairs (R=%.2f, %s, %d rejected)",
-        mean_azimuth, len(azimuths), R, confidence, rejected,
+        "Estimated sun azimuth: %.1f deg from %d pairs "
+        "(R_weighted=%.3f, R_unweighted=%.3f, %s, %d rejected, "
+        "offset range %.0f-%.0fpx)",
+        mean_azimuth, len(azimuths), R, R_unweighted, confidence, rejected,
+        offsets_arr.min(), offsets_arr.max(),
     )
 
     return SunPosition(

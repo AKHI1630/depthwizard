@@ -1,8 +1,10 @@
+import asyncio
 import json
 import logging
 import os
 import struct
 import threading
+import uuid
 from enum import Enum
 
 # Force HuggingFace to use the standard HTTP download path instead of the Xet
@@ -16,6 +18,7 @@ import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import StreamingResponse
 
 from .calibration import (
     CalibrationResult,
@@ -33,6 +36,7 @@ from .sam_segmentation import (
     segment_and_classify,
 )
 from .height_estimation import estimate_heights, height_result_to_json
+from .progress import create_progress, get_progress
 from .structure_dsm import structure_aware_dsm
 from .validation import validate as run_validation
 
@@ -165,6 +169,40 @@ async def health() -> JSONResponse:
         body["sam_error"] = _sam_error
     status_code = 200 if _model_status is ModelStatus.READY else 503
     return JSONResponse(content=body, status_code=status_code)
+
+
+@app.get("/progress/{request_id}")
+async def progress_sse(request_id: str):
+    """SSE endpoint streaming pipeline progress events."""
+
+    async def event_stream():
+        # Wait up to 10s for the pipeline to register this request_id
+        prog = get_progress(request_id)
+        for _ in range(20):
+            if prog is not None:
+                break
+            await asyncio.sleep(0.5)
+            prog = get_progress(request_id)
+        if prog is None:
+            yield f"data: {json.dumps({'error': 'timeout waiting for pipeline', 'done': True})}\n\n"
+            return
+
+        last_pct = -1
+        while True:
+            evt = prog.to_event()
+            pct = evt["pct"]
+            if pct != last_pct or evt["done"]:
+                yield f"data: {json.dumps(evt)}\n\n"
+                last_pct = pct
+            if evt["done"]:
+                break
+            await prog.wait_for_update(timeout=5.0)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def _pack_response(height_array: np.ndarray, meta_dict: dict) -> Response:
@@ -496,6 +534,7 @@ async def estimate_heights_endpoint(
     sun_azimuth: float = Query(default=None, description="Sun azimuth in degrees (override)"),
     sam_max_dim: int = Query(default=512, description="SAM input resolution"),
     sam_points: int = Query(default=12, description="SAM points_per_side"),
+    request_id: str = Query(default=None, description="Client-supplied request ID for progress tracking"),
     metadata_file: UploadFile = File(default=None, description="Sidecar metadata (.IMD/.XML/.MTL)"),
 ) -> JSONResponse:
     """
@@ -508,11 +547,16 @@ async def estimate_heights_endpoint(
     from PIL import Image as PILImage
     from .sun_geometry import SunPosition, parse_sidecar_metadata
 
+    if not request_id:
+        request_id = uuid.uuid4().hex[:12]
+    prog = create_progress(request_id)
+
     if not _sam_ready:
         if _sam_error:
             raise HTTPException(503, f"SAM failed to load: {_sam_error}")
         raise HTTPException(503, "SAM still loading — try again shortly.")
 
+    prog.start_stage("upload")
     image_bytes = await file.read()
     if len(image_bytes) == 0:
         raise HTTPException(400, "Empty file.")
@@ -524,7 +568,6 @@ async def estimate_heights_endpoint(
     _last_prediction["_source_image"] = img
     _last_prediction["_source_bytes"] = image_bytes
 
-    # Parse sidecar metadata if provided
     sidecar_sun = None
     if metadata_file is not None:
         try:
@@ -532,58 +575,95 @@ async def estimate_heights_endpoint(
             sidecar_sun = parse_sidecar_metadata(meta_bytes, metadata_file.filename or "unknown")
         except Exception as e:
             logger.warning("Failed to parse sidecar metadata: %s", e)
+    prog.finish_stage("upload")
 
-    # Segmentation with configurable SAM params
-    t0 = _time.perf_counter()
-    instances = segment_and_classify(
-        img,
-        sam_max_dim=sam_max_dim,
-        points_per_side=sam_points,
-    )
-    t_seg = round(_time.perf_counter() - t0, 2)
-    _last_prediction["instances"] = instances
+    # Run blocking pipeline in a thread so the event loop stays free for SSE
+    def _run_pipeline():
+        import time as _t
 
-    # Sun position from user slider (lowest priority — estimate_heights handles the chain)
-    sun = None
-    if sun_elevation is not None and sun_azimuth is not None:
-        sun = SunPosition(
-            elevation_deg=sun_elevation,
-            azimuth_deg=sun_azimuth,
-            source="user",
-            confidence="high",
+        # SAM segmentation — typically the dominant stage
+        prog.start_stage("sam")
+        t0 = _t.perf_counter()
+        instances = segment_and_classify(
+            img,
+            sam_max_dim=sam_max_dim,
+            points_per_side=sam_points,
+        )
+        t_seg = round(_t.perf_counter() - t0, 2)
+        _last_prediction["instances"] = instances
+        prog.finish_stage("sam")
+
+        # Sun position from user slider
+        _sun = None
+        if sun_elevation is not None and sun_azimuth is not None:
+            _sun = SunPosition(
+                elevation_deg=sun_elevation,
+                azimuth_deg=sun_azimuth,
+                source="user",
+                confidence="high",
+            )
+
+        # DAv2 inline depth for calibration
+        prog.start_stage("dav2")
+        depth_array = None
+        t_dav2_start = _t.perf_counter()
+        if _depth_anything is not None:
+            try:
+                depth_array, _ = _depth_anything.estimate(image_bytes)
+                logger.info("Inline DAv2 for calibration: %.2fs", _t.perf_counter() - t_dav2_start)
+            except Exception as e:
+                logger.warning("DAv2 depth for calibration failed: %s", e)
+        t_dav2 = round(_t.perf_counter() - t_dav2_start, 2)
+        prog.finish_stage("dav2")
+
+        # Multi-cue height estimation
+        prog.start_stage("heights")
+        t_height_start = _t.perf_counter()
+        result = estimate_heights(
+            image_rgb=img_array,
+            instances=instances,
+            sun=_sun,
+            image_bytes=image_bytes,
+            gsd_m=gsd,
+            lat=lat,
+            lon=lon,
+            depth_array=depth_array,
+            sidecar_sun=sidecar_sun,
+        )
+        t_heights = round(_t.perf_counter() - t_height_start, 2)
+        _last_prediction["height_result"] = result
+        prog.finish_stage("heights")
+
+        prog.start_stage("finalize")
+        result_json = height_result_to_json(
+            result,
+            image_width=img_array.shape[1],
+            image_height=img_array.shape[0],
         )
 
-    # Run DAv2 inline on the same image for depth calibration (no cross-request state)
-    depth_array = None
-    if _depth_anything is not None:
-        try:
-            t_dav2 = _time.perf_counter()
-            depth_array, _ = _depth_anything.estimate(image_bytes)
-            logger.info("Inline DAv2 for calibration: %.2fs", _time.perf_counter() - t_dav2)
-        except Exception as e:
-            logger.warning("DAv2 depth for calibration failed: %s", e)
+        stage_timing = {
+            "sam_segmentation_s": t_seg,
+            "dav2_depth_s": t_dav2,
+            "height_estimation_s": t_heights,
+            "total_pipeline_s": round(_t.perf_counter() - prog.start_time, 2),
+        }
+        if result.timing:
+            stage_timing.update({f"detail_{k}": v for k, v in result.timing.items()})
 
-    # Multi-cue height estimation
-    result = estimate_heights(
-        image_rgb=img_array,
-        instances=instances,
-        sun=sun,
-        image_bytes=image_bytes,
-        gsd_m=gsd,
-        lat=lat,
-        lon=lon,
-        depth_array=depth_array,
-        sidecar_sun=sidecar_sun,
-    )
-    _last_prediction["height_result"] = result
+        result_json["segmentation_time_s"] = t_seg
+        result_json["stage_timing"] = stage_timing
+        result_json["request_id"] = request_id
+        prog.finish_stage("finalize")
+        prog.finish()
 
-    result_json = height_result_to_json(
-        result,
-        image_width=img_array.shape[1],
-        image_height=img_array.shape[0],
-    )
-    result_json["segmentation_time_s"] = t_seg
-    logger.info("Height estimation complete: %s", result.coverage)
+        logger.info(
+            "Pipeline complete in %.1fs — SAM: %.1fs, DAv2: %.1fs, Heights: %.1fs",
+            stage_timing["total_pipeline_s"], t_seg, t_dav2, t_heights,
+        )
+        logger.info("Height estimation coverage: %s", result.coverage)
+        return result_json
+
+    result_json = await asyncio.to_thread(_run_pipeline)
     return JSONResponse(content=result_json)
 
 
@@ -624,6 +704,34 @@ async def flood_endpoint(
         "aggregate": result.aggregate,
         "buildings": result.buildings,
     })
+
+
+DEMO_DIR = Path(__file__).parent.parent / "data" / "demo"
+
+@app.get("/demo/list")
+async def demo_list() -> JSONResponse:
+    """List available demo images for pre-loaded examples."""
+    demos = []
+    if DEMO_DIR.exists():
+        for f in sorted(DEMO_DIR.iterdir()):
+            if f.suffix.lower() in (".tif", ".tiff", ".png", ".jpg", ".jpeg"):
+                demos.append({
+                    "name": f.stem,
+                    "filename": f.name,
+                    "size_mb": round(f.stat().st_size / 1024 / 1024, 1),
+                })
+    return JSONResponse(content={"demos": demos, "count": len(demos)})
+
+
+@app.get("/demo/{filename}")
+async def demo_serve(filename: str):
+    """Serve a demo image file."""
+    safe_name = Path(filename).name
+    path = DEMO_DIR / safe_name
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, f"Demo file not found: {safe_name}")
+    media = "image/tiff" if path.suffix.lower() in (".tif", ".tiff") else "image/png"
+    return Response(content=path.read_bytes(), media_type=media)
 
 
 @app.get("/", include_in_schema=False)

@@ -14,6 +14,8 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+MIN_OFFSET_PX = 5.0
+
 
 @dataclass
 class ShadowBlob:
@@ -74,13 +76,9 @@ def detect_shadows(
     shadow_u8 = cv2.morphologyEx(shadow_u8, cv2.MORPH_CLOSE, kernel)
     shadow_u8 = cv2.morphologyEx(shadow_u8, cv2.MORPH_OPEN, kernel)
 
-    # Adjacency check: dilate building masks, shadow must overlap with dilation
-    building_dilated = np.zeros((h, w), dtype=np.uint8)
+    # Adjacency check: dilate merged building mask once (not per-building)
     dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
-    for bm in building_masks:
-        bm_u8 = bm.astype(np.uint8) * 255
-        dilated = cv2.dilate(bm_u8, dilate_kernel)
-        building_dilated = cv2.bitwise_or(building_dilated, dilated)
+    building_dilated = cv2.dilate(all_buildings.astype(np.uint8) * 255, dilate_kernel)
 
     # Shadow must be adjacent to at least one building
     shadow_u8 = cv2.bitwise_and(shadow_u8, building_dilated)
@@ -117,8 +115,9 @@ def match_shadows_to_buildings(
     """
     Match each shadow blob to its casting building.
 
-    Uses nearest-building heuristic: for each shadow blob, find the
-    building whose dilated mask has maximum overlap with the shadow.
+    Pre-dilates all building masks once into a label map, then for each
+    shadow blob picks the building with maximum overlap. O(N_buildings + N_shadows)
+    instead of O(N_buildings × N_shadows).
     """
     if not shadow_blobs or not building_masks:
         return shadow_blobs
@@ -126,18 +125,20 @@ def match_shadows_to_buildings(
     h, w = building_masks[0].shape
     dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max_distance_px, max_distance_px))
 
+    # Pre-dilate all buildings into a single label map (1-indexed)
+    building_label_map = np.zeros((h, w), dtype=np.int32)
+    for i, bm in enumerate(building_masks):
+        dilated = cv2.dilate(bm.astype(np.uint8) * 255, dilate_kernel) > 0
+        building_label_map[dilated & (building_label_map == 0)] = i + 1
+
     for blob in shadow_blobs:
-        best_overlap = 0
-        best_idx = None
-
-        for i, bm in enumerate(building_masks):
-            bm_dilated = cv2.dilate(bm.astype(np.uint8) * 255, dilate_kernel) > 0
-            overlap = (blob.mask & bm_dilated).sum()
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_idx = i
-
-        blob.building_idx = best_idx
+        labels_in_shadow = building_label_map[blob.mask]
+        labels_in_shadow = labels_in_shadow[labels_in_shadow > 0]
+        if len(labels_in_shadow) == 0:
+            blob.building_idx = None
+            continue
+        counts = np.bincount(labels_in_shadow)
+        blob.building_idx = int(np.argmax(counts)) - 1
 
     matched = sum(1 for b in shadow_blobs if b.building_idx is not None)
     logger.info("Shadow matching: %d/%d blobs matched to buildings", matched, len(shadow_blobs))

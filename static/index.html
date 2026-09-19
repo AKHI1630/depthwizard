@@ -143,6 +143,11 @@
   }
   #pipeline-banner.running {
     background: rgba(21,101,192,0.85); color: #fff;
+    animation: pulse-banner 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse-banner {
+    0%, 100% { opacity: 0.85; }
+    50% { opacity: 1; }
   }
 
   /* ── Color ramp (bottom-right) ───────────────────────────────────────── */
@@ -297,6 +302,10 @@
           <option value="1">Cividis</option>
           <option value="2">Terrain</option>
         </select>
+      </div>
+      <div class="check-row">
+        <input type="checkbox" id="show-trees" checked>
+        <label for="show-trees">Show trees</label>
       </div>
       <div class="row">
         <label>Overlay</label>
@@ -988,6 +997,13 @@ document.getElementById('overlay-select').addEventListener('change', e => {
   uniforms.uOverlay.value = parseInt(e.target.value);
 });
 
+document.getElementById('show-trees').addEventListener('change', e => {
+  if (!lod1Group) return;
+  lod1Group.children.forEach(c => {
+    if (c.userData && c.userData.type === 'tree') c.visible = e.target.checked;
+  });
+});
+
 // ─── Camera modes ───────────────────────────────────────────────────────────
 const camHint = document.getElementById('cam-hint');
 const crosshair = document.getElementById('crosshair');
@@ -1553,7 +1569,7 @@ document.getElementById('file-input').addEventListener('change', async () => {
           }
         }
 
-        setPipelineBanner('Running SAM segmentation + height estimation… (~20s on CPU)', 'running');
+        setPipelineBanner('Running SAM segmentation + height estimation…', 'running');
         status.textContent = 'Running SAM segmentation + height estimation…';
 
         const gsd = parseFloat(document.getElementById('gsd-slider').value) || 0.5;
@@ -1561,10 +1577,29 @@ document.getElementById('file-input').addEventListener('change', async () => {
         const samForm = new FormData();
         samForm.append('file', lastUploadedFile);
 
+        // Generate request ID and connect SSE for live progress
+        const reqId = Math.random().toString(36).slice(2, 14);
+        let progressSource = null;
+        try {
+          progressSource = new EventSource('/progress/' + reqId);
+          progressSource.onmessage = function(ev) {
+            try {
+              const p = JSON.parse(ev.data);
+              if (p.done) { progressSource.close(); return; }
+              let msg = (p.stage_name || p.stage) + ' ' + p.pct.toFixed(0) + '%';
+              msg += ' · ' + p.elapsed_s.toFixed(0) + 's elapsed';
+              if (p.eta_s != null && p.eta_s > 0) msg += ' · ~' + p.eta_s.toFixed(0) + 's remaining';
+              setPipelineBanner(msg, 'running');
+            } catch(ex) {}
+          };
+          progressSource.onerror = function() { progressSource.close(); };
+        } catch(ex) {}
+
         const samResp = await fetch(
-          '/estimate-heights?gsd=' + gsd + '&sun_elevation=' + sunElev + '&sun_azimuth=180',
+          '/estimate-heights?gsd=' + gsd + '&sun_elevation=' + sunElev + '&sun_azimuth=180&request_id=' + reqId,
           { method: 'POST', body: samForm }
         );
+        if (progressSource) try { progressSource.close(); } catch(ex) {}
 
         if (!samResp.ok) {
           const errJ = await samResp.json().catch(() => ({}));
@@ -1581,6 +1616,17 @@ document.getElementById('file-input').addEventListener('change', async () => {
         const lod1Result = buildLOD1Scene(samData, lastSourceBlobUrl);
         lod1Instances = samData.instances;
 
+        // Extract coverage early — needed by sun label and stats
+        const cov = samData.coverage || {};
+        const measured = cov.directly_measured || 0;
+        const relative = cov.relative || 0;
+        const inferred = cov.inferred || 0;
+        const failed = cov.failed || 0;
+        const total = cov.total_buildings || 0;
+        const shadowR = cov.shadow_coherence_R;
+        const shadowOk = cov.shadow_reliable !== false;
+        const hs = samData.height_stats || {};
+
         // ── Sun source label ──
         const sunInfo = samData.sun || {};
         const srcLabels = {
@@ -1590,7 +1636,10 @@ document.getElementById('file-input').addEventListener('change', async () => {
           'user': 'estimated — user supplied',
           'default': 'default (no source)',
         };
-        const srcText = srcLabels[sunInfo.source] || sunInfo.source || 'unknown';
+        let srcText = srcLabels[sunInfo.source] || sunInfo.source || 'unknown';
+        if (sunInfo.source === 'estimated' && !shadowOk) {
+          srcText = 'user-supplied (shadow measurement failed, R=' + (shadowR != null ? shadowR.toFixed(2) : '?') + ')';
+        }
         document.getElementById('sun-source-label').textContent = srcText;
         if (sunInfo.elevation_deg) {
           document.getElementById('sun-elev-slider').value = sunInfo.elevation_deg;
@@ -1614,16 +1663,19 @@ document.getElementById('file-input').addEventListener('change', async () => {
         }
 
         // ── Coverage + stats ──
-        const cov = samData.coverage || {};
         const covEl = document.getElementById('coverage-display');
-        const measured = cov.directly_measured || 0;
-        const relative = cov.relative || 0;
-        const inferred = cov.inferred || 0;
-        const failed = cov.failed || 0;
-        const total = cov.total_buildings || 0;
-        const shadowR = cov.shadow_coherence_R;
-        const shadowOk = cov.shadow_reliable !== false;
-        const hs = samData.height_stats || {};
+
+        // Shadow feasibility warning
+        const feasibility = cov.shadow_feasibility;
+        if (feasibility && feasibility.warning) {
+          const fDiv = document.getElementById('coverage-display');
+          const warnLine = document.createElement('div');
+          warnLine.style.color = '#e65100';
+          warnLine.style.fontWeight = '600';
+          warnLine.textContent = feasibility.warning +
+            ' (h_min=' + feasibility.h_min_m + 'm at ' + feasibility.sun_elevation_deg + '° sun, ' + feasibility.gsd_m + 'm GSD)';
+          fDiv.parentNode.insertBefore(warnLine, fDiv);
+        }
 
         let covText = '';
         if (!shadowOk) {
@@ -1647,7 +1699,7 @@ document.getElementById('file-input').addEventListener('change', async () => {
             ' · <span class="sv">' + relative + '</span> relative' +
             ' · <span class="sv">' + inferred + '</span> inferred' +
             (hs.mean_m ? ' · mean <span class="sv">' + hs.mean_m.toFixed(1) + ' m</span> (non-metric)' : '') +
-            (samData.timing ? ' · <span class="sv">' + samData.timing.total + 's</span>' : '')
+            (samData.stage_timing ? ' · <span class="sv">' + samData.stage_timing.total_pipeline_s + 's</span>' : '')
           );
           setPipelineBanner(
             'LOD1 ran — shadow R=' + (shadowR != null ? shadowR.toFixed(2) : '?') +
@@ -1662,7 +1714,7 @@ document.getElementById('file-input').addEventListener('change', async () => {
             ' · <span class="sv">' + measured + '</span> measured' +
             ' · <span class="sv">' + inferred + '</span> inferred' +
             (hs.mean_m ? ' · mean <span class="sv">' + hs.mean_m.toFixed(1) + ' m</span>' : '') +
-            (samData.timing ? ' · <span class="sv">' + samData.timing.total + 's</span>' : '')
+            (samData.stage_timing ? ' · <span class="sv">' + samData.stage_timing.total_pipeline_s + 's</span>' : '')
           );
           setPipelineBanner('', 'ok');
         }
@@ -2037,6 +2089,24 @@ document.getElementById('btn-flood-csv').addEventListener('click', () => {
   a.href = url; a.download = 'flood_analysis.csv'; a.click();
   URL.revokeObjectURL(url);
 });
+
+// ─── Demo auto-load ─────────────────────────────────────────────────────────
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  const demoFile = params.get('demo');
+  if (!demoFile) return;
+  document.getElementById('status').textContent = 'Loading demo: ' + demoFile + '…';
+  fetch('/demo/' + encodeURIComponent(demoFile))
+    .then(r => { if (!r.ok) throw new Error('Demo not found'); return r.blob(); })
+    .then(blob => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([blob], demoFile, { type: blob.type }));
+      const input = document.getElementById('file-input');
+      input.files = dt.files;
+      input.dispatchEvent(new Event('change'));
+    })
+    .catch(e => { document.getElementById('status').textContent = 'Demo load failed: ' + e.message; });
+})();
 
 // ─── Resize + render loop ───────────────────────────────────────────────────
 window.addEventListener('resize', () => {

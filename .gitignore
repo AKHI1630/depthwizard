@@ -10,6 +10,7 @@ checkpoints/
 *.ckpt
 *.mp4
 data/
+!data/demo/.gitkeep
 *.pyc
 .env
 dist/

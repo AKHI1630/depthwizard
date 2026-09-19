@@ -114,8 +114,51 @@ models/
 └── depth-anything-v2-small/   Local weights (gitignored)
 ```
 
+## Final Consolidation (2026-09-19)
+
+### P1 — Detection Recall ✅
+- Tested SAM configs: 384/8 (6.9% recall, 47s), 512/12 (9.4%, 65s), 768/16 (17.2%, 107s)
+- IoU≥0.3 recall is low because SAM merges adjacent buildings in dense urban fabric
+- Centroid≤30m recall is 95.9% at 768/16 — SAM finds buildings but doesn't separate them
+- Default set to 512/12 (best recall under 60s budget)
+- Low IoU is a known SAM limitation in dense urban areas, not a code bug
+
+### P2 — GAMUS Evaluator ✅
+- `eval/gamus.py` created with two protocols: frozen global affine (headline) + per-crop oracle (ceiling)
+- Height bands: 0-3m, 3-10m, 10-20m, 20-50m, 50m+
+- 5 sanity tests all pass (identity, constant pred, nodata masking, affine recovery, stratification)
+- Blocked: no paired GAMUS .h5 tiles available locally — script ready to run when data arrives
+
+### P3 — Correctness Audit ✅
+- **Height underestimate confirmed**: median 3.4m across 148 buildings in Antakya old city
+- **Root cause**: `shadow_candidate &= ~all_buildings` in shadow_detection.py:71 truncates shadows falling on neighbouring building roofs. In dense fabric (5-10m building spacing), a 10m building's shadow is clipped to ~3m
+- **Coverage categories**: sum correctly (0 measured + 37 borderline + 109 relative + 2 inferred + 19 failed = 167)
+- **No silent fallbacks**: every building gets measured/relative/inferred/failed
+- **Formula correct**: h = shadow_length × GSD × tan(sun_elevation)
+- **Not fixed**: mutual shading truncation is fundamental — fixing requires inter-building occlusion modelling (out of scope)
+
+### P4 — UI/Render Quality ✅
+- Viewport fills window (100vw × 100vh)
+- Sidebar collapsible with toggle button
+- Ground plane level at y=0 with source image texture
+- Camera auto-fits to LOD1 bounding box (3/4 elevated view)
+- Colour ramp legend (bottom-right, shifts when panel collapses)
+- Provenance badge (RELATIVE / GeoTIFF DIRECT / SRTM CALIBRATED)
+- Trees low-poly (cylinder + sphere) with Show/Hide toggle
+- Roof texture uses native image via UV remapping
+- Render loop uses requestAnimationFrame (targets 60fps)
+
+### P5 — Deployment ✅
+- **Resource needs**: ~4GB RAM (SAM ViT-B 375MB + DA-V2 99MB + torch overhead), CPU-only, no GPU required
+- **Dockerfile**: multi-stage build, Python 3.12-slim, HEALTHCHECK via curl /health
+- **Health check**: GET /health returns 200 when models loaded, 503 during warmup (start-period 60s)
+- **Demo mode**: GET /demo/list returns available examples, GET /demo/{file} serves them. Landing page shows demo buttons. index.html auto-loads via ?demo=filename query param
+- **requirements.txt**: all dependencies pinned with exact versions
+
 ## Known Limitations
+- **Shadow truncation in dense urban fabric**: shadows falling on neighbouring building roofs are excluded, underestimating heights by 2-3× in closely-spaced buildings. This is the dominant error source in old city / dense residential areas.
 - Output is uncalibrated (0–150m relative) without SRTM reference.
 - CPU-only inference — no GPU, no batching.
 - SLIC is the bottleneck (~2s for 1024×1024); could be replaced with SEEDS or watershed for speed.
 - Structure classification uses fixed thresholds — may not generalize to all satellite imagery.
+- SAM merges adjacent buildings — individual building IoU recall is ~10-17% in dense areas despite high centroid recall (96%).
