@@ -1,0 +1,126 @@
+[
+  {
+    "crop": "crop1_antakya_pre",
+    "osm_total": 48,
+    "osm_with_ref": 1,
+    "pred_buildings": 14,
+    "matched": 0,
+    "matched_measured": 0,
+    "all": {
+      "n": 0,
+      "mae": null,
+      "rmse": null,
+      "r2": null,
+      "bias": null
+    },
+    "measured_only": {
+      "n": 0,
+      "mae": null,
+      "rmse": null,
+      "r2": null,
+      "bias": null
+    },
+    "matches": [],
+    "honesty": {
+      "ref_from_height_tag": 0,
+      "ref_from_levels_tag": 0,
+      "levels_assumed_m_per_level": 3.2,
+      "iou_threshold": 0.3,
+      "note": "Zero height tags in Antakya; all references from building:levels at 3.2m/level (estimated, not surveyed)."
+    },
+    "api_time_s": 41.2
+  },
+  {
+    "crop": "crop2_antakya_pre",
+    "osm_total": 100,
+    "osm_with_ref": 0,
+    "pred_buildings": 23,
+    "matched": 0,
+    "matched_measured": 0,
+    "all": {
+      "n": 0,
+      "mae": null,
+      "rmse": null,
+      "r2": null,
+      "bias": null
+    },
+    "measured_only": {
+      "n": 0,
+      "mae": null,
+      "rmse": null,
+      "r2": null,
+      "bias": null
+    },
+    "matches": [],
+    "honesty": {
+      "ref_from_height_tag": 0,
+      "ref_from_levels_tag": 0,
+      "levels_assumed_m_per_level": 3.2,
+      "iou_threshold": 0.3,
+      "note": "Zero height tags in Antakya; all references from building:levels at 3.2m/level (estimated, not surveyed)."
+    },
+    "api_time_s": 43.5
+  },
+  {
+    "crop": "crop3_antakya_pre",
+    "osm_total": 7,
+    "osm_with_ref": 0,
+    "pred_buildings": 19,
+    "matched": 0,
+    "matched_measured": 0,
+    "all": {
+      "n": 0,
+      "mae": null,
+      "rmse": null,
+      "r2": null,
+      "bias": null
+    },
+    "measured_only": {
+      "n": 0,
+      "mae": null,
+      "rmse": null,
+      "r2": null,
+      "bias": null
+    },
+    "matches": [],
+    "honesty": {
+      "ref_from_height_tag": 0,
+      "ref_from_levels_tag": 0,
+      "levels_assumed_m_per_level": 3.2,
+      "iou_threshold": 0.3,
+      "note": "Zero height tags in Antakya; all references from building:levels at 3.2m/level (estimated, not surveyed)."
+    },
+    "api_time_s": 42.8
+  },
+  {
+    "crop": "crop4_antakya_pre",
+    "osm_total": 169,
+    "osm_with_ref": 7,
+    "pred_buildings": 29,
+    "matched": 0,
+    "matched_measured": 0,
+    "all": {
+      "n": 0,
+      "mae": null,
+      "rmse": null,
+      "r2": null,
+      "bias": null
+    },
+    "measured_only": {
+      "n": 0,
+      "mae": null,
+      "rmse": null,
+      "r2": null,
+      "bias": null
+    },
+    "matches": [],
+    "honesty": {
+      "ref_from_height_tag": 0,
+      "ref_from_levels_tag": 0,
+      "levels_assumed_m_per_level": 3.2,
+      "iou_threshold": 0.3,
+      "note": "Zero height tags in Antakya; all references from building:levels at 3.2m/level (estimated, not surveyed)."
+    },
+    "api_time_s": 51.6
+  }
+]

@@ -331,7 +331,10 @@ def estimate_heights(
     # but wrong direction) from sneaking through on p_R alone.
     shadow_coherence_R = measured_sun.coherence_R
     shadow_n_pairs = measured_sun.n_shadow_pairs
-    shadow_reliable = shadow_coherence_R is not None and shadow_coherence_R >= 0.5
+    shadow_reliable = (shadow_coherence_R is not None
+                       and shadow_coherence_R >= 0.5
+                       and measured_delta_to_ref is not None
+                       and measured_delta_to_ref <= 20.0)
     shadow_borderline = False
     shadow_p_combined = None
 

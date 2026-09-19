@@ -1633,7 +1633,7 @@ document.getElementById('file-input').addEventListener('change', async () => {
           'metadata': 'from product metadata',
           'computed': 'computed (pysolar)',
           'estimated': 'measured from shadows',
-          'user': 'estimated — user supplied',
+          'user': 'estimated — derived from assumed elevation, no acquisition timestamp',
           'default': 'default (no source)',
         };
         let srcText = srcLabels[sunInfo.source] || sunInfo.source || 'unknown';
@@ -2141,7 +2141,7 @@ document.getElementById('btn-flood-csv').addEventListener('click', () => {
         'metadata': 'from product metadata',
         'computed': 'computed (pysolar)',
         'estimated': 'measured from shadows',
-        'user': 'estimated — user supplied',
+        'user': 'estimated — derived from assumed elevation, no acquisition timestamp',
         'default': 'default (no source)',
       };
       document.getElementById('sun-source-label').textContent =
