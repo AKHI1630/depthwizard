@@ -160,7 +160,7 @@ def _load_models() -> None:
 async def startup() -> None:
     t = threading.Thread(target=_load_models, name="model-loader", daemon=True)
     t.start()
-    logger.info("Server ready. Depth model loading in background; SAM loads only during segmentation to stay within free-tier RAM.")
+    logger.info("Server ready. Depth model loading in background; SAM is disabled during startup and loads only on demand.")
 
 
 # ── Estimator selection ───────────────────────────────────────────────────────
