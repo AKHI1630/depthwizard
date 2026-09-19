@@ -31,6 +31,7 @@ from .estimators.synthetic import SyntheticEstimator
 from .flood_model import compute_flood
 from .sam_segmentation import (
     get_mask_generator,
+    unload_sam_model,
     instances_to_json,
     render_segmentation_overlay,
     segment_and_classify,
@@ -63,6 +64,7 @@ _model_error: str = ""
 _da_error: str = ""
 _sam_ready: bool = False
 _sam_error: str = ""
+_model_swap_lock = threading.Lock()
 
 
 def _load_sam() -> None:
@@ -74,6 +76,57 @@ def _load_sam() -> None:
     except Exception as exc:
         _sam_error = str(exc)
         logger.warning("SAM failed to load: %s", exc)
+
+
+def _unload_depth_anything() -> None:
+    global _depth_anything
+    _depth_anything = None
+    try:
+        import gc
+        import torch
+        gc.collect()
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+    import gc
+    gc.collect()
+    logger.info("Depth-Anything-V2 unloaded to release memory.")
+
+
+def _ensure_depth_anything() -> bool:
+    global _depth_anything, _da_error
+    if _depth_anything is not None:
+        return True
+    try:
+        from .estimators.depth_anything import DepthAnythingEstimator
+        _depth_anything = DepthAnythingEstimator()
+        _da_error = ""
+        logger.info("Depth-Anything-V2-Small loaded successfully.")
+        return True
+    except Exception as exc:
+        _da_error = str(exc)
+        logger.warning("Depth Anything V2 failed to load: %s", exc)
+        return False
+
+
+def _run_with_sam(image, sam_max_dim: int, sam_points: int):
+    """Run SAM with Depth Anything unloaded to stay under Render Free RAM."""
+    global _sam_ready, _sam_error
+    with _model_swap_lock:
+        _unload_depth_anything()
+        try:
+            get_mask_generator(points_per_side=sam_points)
+            _sam_ready = True
+            _sam_error = ""
+            return segment_and_classify(
+                image,
+                sam_max_dim=sam_max_dim,
+                points_per_side=sam_points,
+            )
+        finally:
+            unload_sam_model()
+            _sam_ready = False
+            _ensure_depth_anything()
 
 
 def _load_models() -> None:
@@ -107,9 +160,7 @@ def _load_models() -> None:
 async def startup() -> None:
     t = threading.Thread(target=_load_models, name="model-loader", daemon=True)
     t.start()
-    t_sam = threading.Thread(target=_load_sam, name="sam-loader", daemon=True)
-    t_sam.start()
-    logger.info("Server ready. Models loading in background — watch for the 'DepthWizard ready' line.")
+    logger.info("Server ready. Depth model loading in background; SAM loads only during segmentation to stay within free-tier RAM.")
 
 
 # ── Estimator selection ───────────────────────────────────────────────────────
@@ -448,11 +499,6 @@ async def segment_endpoint(file: UploadFile = File(...)) -> JSONResponse:
 
     from PIL import Image as PILImage
 
-    if not _sam_ready:
-        if _sam_error:
-            raise HTTPException(503, f"SAM failed to load: {_sam_error}")
-        raise HTTPException(503, "SAM still loading — please try again in a moment.")
-
     image_bytes = await file.read()
     if len(image_bytes) == 0:
         raise HTTPException(400, "Empty file.")
@@ -464,7 +510,10 @@ async def segment_endpoint(file: UploadFile = File(...)) -> JSONResponse:
     _last_prediction["_source_bytes"] = image_bytes
 
     t0 = _time.perf_counter()
-    instances = segment_and_classify(img)
+    try:
+        instances = _run_with_sam(img, sam_max_dim=512, sam_points=12)
+    except Exception as exc:
+        raise HTTPException(503, f"SAM failed to load or run: {exc}") from exc
     t_seg = round(_time.perf_counter() - t0, 2)
 
     _last_prediction["instances"] = instances
@@ -544,11 +593,6 @@ async def estimate_heights_endpoint(
         request_id = uuid.uuid4().hex[:12]
     prog = create_progress(request_id)
 
-    if not _sam_ready:
-        if _sam_error:
-            raise HTTPException(503, f"SAM failed to load: {_sam_error}")
-        raise HTTPException(503, "SAM still loading — try again shortly.")
-
     prog.start_stage("upload")
     image_bytes = await file.read()
     if len(image_bytes) == 0:
@@ -577,11 +621,7 @@ async def estimate_heights_endpoint(
         # SAM segmentation — typically the dominant stage
         prog.start_stage("sam")
         t0 = _t.perf_counter()
-        instances = segment_and_classify(
-            img,
-            sam_max_dim=sam_max_dim,
-            points_per_side=sam_points,
-        )
+        instances = _run_with_sam(img, sam_max_dim=sam_max_dim, sam_points=sam_points)
         t_seg = round(_t.perf_counter() - t0, 2)
         _last_prediction["instances"] = instances
         prog.finish_stage("sam")
