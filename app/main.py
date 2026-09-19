@@ -16,7 +16,7 @@ from typing import Literal
 
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
@@ -532,8 +532,8 @@ async def estimate_heights_endpoint(
     lon: float = Query(default=None, description="Longitude for sun computation"),
     sun_elevation: float = Query(default=None, description="Sun elevation in degrees (override)"),
     sun_azimuth: float = Query(default=None, description="Sun azimuth in degrees (override)"),
-    sam_max_dim: int = Query(default=512, description="SAM input resolution"),
-    sam_points: int = Query(default=12, description="SAM points_per_side"),
+    sam_max_dim: int = Query(default=384, description="SAM input resolution"),
+    sam_points: int = Query(default=8, description="SAM points_per_side"),
     request_id: str = Query(default=None, description="Client-supplied request ID for progress tracking"),
     metadata_file: UploadFile = File(default=None, description="Sidecar metadata (.IMD/.XML/.MTL)"),
 ) -> JSONResponse:
@@ -711,9 +711,9 @@ CROPS_DIR = Path(__file__).parent.parent / "data" / "crops"
 
 DEMO_SCENES = [
     {"name": "Antakya crop2 (measured)", "filename": "crop2_antakya_pre.tif",
-     "gsd": 0.305, "sun_elevation": 28.3, "sun_azimuth": 162.0, "default": True},
+     "gsd": 0.305, "sun_elevation": 28.1, "sun_azimuth": 141.6, "default": True},
     {"name": "Antakya crop1 (borderline)", "filename": "crop1_antakya_pre.tif",
-     "gsd": 0.305, "sun_elevation": 28.3, "sun_azimuth": 162.0},
+     "gsd": 0.305, "sun_elevation": 28.1, "sun_azimuth": 141.6},
     {"name": "Kathmandu NE (rejected)", "filename": "crop1_kathmandu_NE.tif",
      "gsd": 0.5, "sun_elevation": 45.0, "sun_azimuth": 180.0},
 ]
@@ -749,12 +749,12 @@ async def demo_serve(filename: str):
     if precomputed.is_file():
         ext = precomputed.suffix.lower()
         media_map = {".json": "application/json", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
-        return Response(content=precomputed.read_bytes(), media_type=media_map.get(ext, "application/octet-stream"))
+        return FileResponse(str(precomputed), media_type=media_map.get(ext, "application/octet-stream"))
     path = _find_demo_file(filename)
     if not path:
         raise HTTPException(404, f"Demo file not found: {filename}")
     media = "image/tiff" if path.suffix.lower() in (".tif", ".tiff") else "image/png"
-    return Response(content=path.read_bytes(), media_type=media)
+    return FileResponse(str(path), media_type=media)
 
 
 @app.get("/", include_in_schema=False)

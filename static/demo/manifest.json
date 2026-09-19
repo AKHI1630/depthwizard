@@ -5,8 +5,8 @@
     "json": "demo/crop2_antakya.json",
     "texture": "demo/crop2_antakya.jpg",
     "gsd": 0.305,
-    "sun_elevation": 28.3,
-    "sun_azimuth": 162.0,
+    "sun_elevation": 28.1,
+    "sun_azimuth": 141.6,
     "default": true
   },
   {
@@ -15,8 +15,8 @@
     "json": "demo/crop1_antakya.json",
     "texture": "demo/crop1_antakya.jpg",
     "gsd": 0.305,
-    "sun_elevation": 28.3,
-    "sun_azimuth": 162.0,
+    "sun_elevation": 28.1,
+    "sun_azimuth": 141.6,
     "default": false
   },
   {
