@@ -1,0 +1,32 @@
+[
+  {
+    "id": "crop2_antakya",
+    "label": "Antakya crop2 (measured)",
+    "json": "demo/crop2_antakya.json",
+    "texture": "demo/crop2_antakya.jpg",
+    "gsd": 0.305,
+    "sun_elevation": 28.3,
+    "sun_azimuth": 162.0,
+    "default": true
+  },
+  {
+    "id": "crop1_antakya",
+    "label": "Antakya crop1 (borderline)",
+    "json": "demo/crop1_antakya.json",
+    "texture": "demo/crop1_antakya.jpg",
+    "gsd": 0.305,
+    "sun_elevation": 28.3,
+    "sun_azimuth": 162.0,
+    "default": false
+  },
+  {
+    "id": "crop1_kathmandu",
+    "label": "Kathmandu NE (rejected)",
+    "json": "demo/crop1_kathmandu.json",
+    "texture": "demo/crop1_kathmandu.jpg",
+    "gsd": 0.5,
+    "sun_elevation": 45.0,
+    "sun_azimuth": 180.0,
+    "default": false
+  }
+]

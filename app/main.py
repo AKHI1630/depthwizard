@@ -707,29 +707,52 @@ async def flood_endpoint(
 
 
 DEMO_DIR = Path(__file__).parent.parent / "data" / "demo"
+CROPS_DIR = Path(__file__).parent.parent / "data" / "crops"
+
+DEMO_SCENES = [
+    {"name": "Antakya crop2 (measured)", "filename": "crop2_antakya_pre.tif",
+     "gsd": 0.305, "sun_elevation": 28.3, "sun_azimuth": 162.0, "default": True},
+    {"name": "Antakya crop1 (borderline)", "filename": "crop1_antakya_pre.tif",
+     "gsd": 0.305, "sun_elevation": 28.3, "sun_azimuth": 162.0},
+    {"name": "Kathmandu NE (rejected)", "filename": "crop1_kathmandu_NE.tif",
+     "gsd": 0.5, "sun_elevation": 45.0, "sun_azimuth": 180.0},
+]
+
+
+def _find_demo_file(filename: str) -> Path | None:
+    safe = Path(filename).name
+    for d in (DEMO_DIR, CROPS_DIR):
+        p = d / safe
+        if p.exists() and p.is_file():
+            return p
+    return None
+
 
 @app.get("/demo/list")
 async def demo_list() -> JSONResponse:
-    """List available demo images for pre-loaded examples."""
-    demos = []
-    if DEMO_DIR.exists():
-        for f in sorted(DEMO_DIR.iterdir()):
-            if f.suffix.lower() in (".tif", ".tiff", ".png", ".jpg", ".jpeg"):
-                demos.append({
-                    "name": f.stem,
-                    "filename": f.name,
-                    "size_mb": round(f.stat().st_size / 1024 / 1024, 1),
-                })
-    return JSONResponse(content={"demos": demos, "count": len(demos)})
+    """List available demo scenes with metadata."""
+    available = []
+    for scene in DEMO_SCENES:
+        p = _find_demo_file(scene["filename"])
+        if p:
+            available.append({
+                **scene,
+                "size_mb": round(p.stat().st_size / 1024 / 1024, 1),
+            })
+    return JSONResponse(content={"demos": available, "count": len(available)})
 
 
 @app.get("/demo/{filename}")
 async def demo_serve(filename: str):
-    """Serve a demo image file."""
-    safe_name = Path(filename).name
-    path = DEMO_DIR / safe_name
-    if not path.exists() or not path.is_file():
-        raise HTTPException(404, f"Demo file not found: {safe_name}")
+    """Serve a demo file (image, precomputed JSON, or texture JPEG)."""
+    precomputed = STATIC_DIR / "demo" / filename
+    if precomputed.is_file():
+        ext = precomputed.suffix.lower()
+        media_map = {".json": "application/json", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
+        return Response(content=precomputed.read_bytes(), media_type=media_map.get(ext, "application/octet-stream"))
+    path = _find_demo_file(filename)
+    if not path:
+        raise HTTPException(404, f"Demo file not found: {filename}")
     media = "image/tiff" if path.suffix.lower() in (".tif", ".tiff") else "image/png"
     return Response(content=path.read_bytes(), media_type=media)
 

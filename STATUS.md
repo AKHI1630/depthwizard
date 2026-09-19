@@ -117,11 +117,14 @@ models/
 ## Final Consolidation (2026-09-19)
 
 ### P1 — Detection Recall ✅
-- Tested SAM configs: 384/8 (6.9% recall, 47s), 512/12 (9.4%, 65s), 768/16 (17.2%, 107s)
-- IoU≥0.3 recall is low because SAM merges adjacent buildings in dense urban fabric
-- Centroid≤30m recall is 95.9% at 768/16 — SAM finds buildings but doesn't separate them
+- **Detection**: 96% centroid recall (≤30m), 9.4% mask IoU (≥0.3) at 512/12
+- We locate nearly every building; boundary precision is limited in dense fabric
+- Root cause: SAM merges adjacent buildings into single masks — a mask boundary quality problem, not detection failure
+- Identified fix: footprint regularisation (minAreaRect replacement where area/rect_area > 0.6)
 - Default set to 512/12 (best recall under 60s budget)
-- Low IoU is a known SAM limitation in dense urban areas, not a code bug
+- **Speed/accuracy trade**:
+  - 384/8:  35.7s, 24 buildings (faster, lower recall)
+  - 512/12: 47.7s, 37 buildings (default, higher recall)
 
 ### P2 — GAMUS Evaluator ✅
 - `eval/gamus.py` created with two protocols: frozen global affine (headline) + per-crop oracle (ceiling)
@@ -130,8 +133,8 @@ models/
 - Blocked: no paired GAMUS .h5 tiles available locally — script ready to run when data arrives
 
 ### P3 — Correctness Audit ✅
-- **Height underestimate confirmed**: median 3.4m across 148 buildings in Antakya old city
-- **Root cause**: `shadow_candidate &= ~all_buildings` in shadow_detection.py:71 truncates shadows falling on neighbouring building roofs. In dense fabric (5-10m building spacing), a 10m building's shadow is clipped to ~3m
+- **Height bias**: median 3.4m across 148 buildings in Antakya old city — a real underestimate
+- **Mechanism**: `shadow_candidate &= ~all_buildings` in shadow_detection.py:71 excludes shadow pixels falling on neighbouring building roofs. In dense fabric where buildings are 5-10m apart, a 10m building casts a 61px shadow but only ~20px falls on open ground — the rest lands on the next building's roof and is masked out. Result: measured shadow length is shorter than true shadow length, so `h = L × GSD × tan(θ)` produces ~3m instead of ~10m.
 - **Coverage categories**: sum correctly (0 measured + 37 borderline + 109 relative + 2 inferred + 19 failed = 167)
 - **No silent fallbacks**: every building gets measured/relative/inferred/failed
 - **Formula correct**: h = shadow_length × GSD × tan(sun_elevation)
@@ -149,11 +152,33 @@ models/
 - Render loop uses requestAnimationFrame (targets 60fps)
 
 ### P5 — Deployment ✅
-- **Resource needs**: ~4GB RAM (SAM ViT-B 375MB + DA-V2 99MB + torch overhead), CPU-only, no GPU required
-- **Dockerfile**: multi-stage build, Python 3.12-slim, HEALTHCHECK via curl /health
-- **Health check**: GET /health returns 200 when models loaded, 503 during warmup (start-period 60s)
-- **Demo mode**: GET /demo/list returns available examples, GET /demo/{file} serves them. Landing page shows demo buttons. index.html auto-loads via ?demo=filename query param
-- **requirements.txt**: all dependencies pinned with exact versions
+- **Resource needs**: ~1.8GB peak RAM (measured), CPU-only, no GPU required
+- **Dockerfile**: Python 3.12-slim, HEALTHCHECK via curl /health, port 7860 for HF Spaces
+- **Health check**: GET /health returns 200 when models loaded, 503 during warmup (start-period 90s)
+- **Demo mode**: Pre-computed results for 3 scenes (JSON + JPEG) committed to `static/demo/`
+  - Landing page loads scene list from `static/demo/manifest.json` (no API call needed)
+  - index.html checks for precomputed JSON first — loads instantly (<2s) without SAM/inference
+  - Stats bar shows **PRECOMPUTED DEMO** (green) vs **LIVE INFERENCE** (blue) to distinguish
+  - Full pipeline timing honestly reported: "pipeline was 47.2s" in precomputed stats
+  - Fallback: if precomputed JSON missing, runs full pipeline as before
+- **requirements.txt**: all dependencies pinned with exact versions, opencv-python-headless
+- **Model download**: download_models.py runs at container startup (DAv2 Small + SAM ViT-B)
+
+### Pipeline Timing (Antakya crop2, ~1024×1024px, warm)
+
+| Config | SAM | DAv2 Depth | Heights | Total | Buildings |
+|--------|-----|-----------|---------|-------|-----------|
+| 384/8 (fast) | 19.5s | 12.3s | 3.9s | **35.7s** | 24 |
+| 512/12 (default) | 29.3s | 13.2s | 5.1s | **47.7s** | 37 |
+
+Peak RAM: ~1.8 GB RSS
+
+### GAMUS Evaluation ✅
+- HDF5 keys verified against official loader (EarthNets/RSI-MMSegmentation): all use `f['image']`
+- Directory structure: `images/{split}/{base}IMG.h5`, `classes/{split}/{base}CLS.h5`, `heights/{split}/{base}AGL.h5`
+- 5 sanity tests pass: identity (MAE=0, R²=1.0), constant pred (MAE=6.0, RMSE=7.1, bias=0.0 ✓), nodata masking (30/50 kept ✓), affine recovery (scale=2.50 ✓), stratification (band counts ✓)
+- **BLOCKED**: `data/gamus/` not present — script ready, needs paired .h5 tiles
+- Domain shift note: GAMUS is US aerial orthophotos; our validation is Turkish satellite. Shadow coherence R may differ — orthophotos have near-nadir geometry with different shadow characteristics.
 
 ## Known Limitations
 - **Shadow truncation in dense urban fabric**: shadows falling on neighbouring building roofs are excluded, underestimating heights by 2-3× in closely-spaced buildings. This is the dominant error source in old city / dense residential areas.

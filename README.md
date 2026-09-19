@@ -1,3 +1,13 @@
+---
+title: DepthWizard
+emoji: 🏗️
+colorFrom: blue
+colorTo: cyan
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # DepthWizard — SIH 26175
 
 Single-view metric height estimation and 3D flythrough from satellite imagery.
@@ -10,27 +20,23 @@ git clone <repo-url> && cd depthwizard
 
 # 2. Create venv and install
 python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # Linux/Mac
+source .venv/bin/activate        # Linux/Mac
+# .venv\Scripts\activate         # Windows
 
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 
-# 3. Download model weights (one-time)
-# Depth Anything V2 Small → models/depth-anything-v2-small/
-# SAM ViT-B → models/sam_vit_b_01ec64.pth
-
-# 4. Run
-uvicorn app.main:app --host 127.0.0.1 --port 8001
-# Open http://localhost:8001
+# 3. Run (models download automatically on first start)
+python -m uvicorn app.main:app --host 0.0.0.0 --port 7860
+# Open http://localhost:7860
 ```
 
 ### Docker
 
 ```bash
 docker build -t depthwizard .
-docker run -p 8001:8001 depthwizard
-# Health check: curl http://localhost:8001/health
+docker run -p 7860:7860 depthwizard
+# Health check: curl http://localhost:7860/health
 ```
 
 ## Pipeline
@@ -44,26 +50,46 @@ docker run -p 8001:8001 depthwizard
 
 ## Results
 
-Tested on 4 pre-earthquake Antakya crops (148 buildings total).
+Tested on 4 pre-earthquake Antakya crops (148 buildings total, ~1024×1024px tiles).
 
-| Metric | Value | Notes |
-|--------|-------|-------|
-| SAM building recall (IoU >= 0.3) | 9.4% (512/12) | Low due to SAM merging adjacent buildings |
-| SAM centroid recall (<= 30m) | 95.9% (768/16) | SAM finds buildings but doesn't separate them |
-| Median building height | 3.4 m | Systematic underestimate in dense urban fabric |
-| Height coverage | 37 borderline + 109 relative + 2 inferred + 19 failed of 167 | No silent fallbacks |
-| Pipeline time (512px) | ~5.4s | CPU-only, no GPU |
+### Detection
+
+| Metric | 384/8 | 512/12 (default) |
+|--------|-------|-------------------|
+| Centroid recall (≤30m) | — | **96%** |
+| Mask IoU recall (≥0.3) | 6.9% | **9.4%** |
+| Buildings detected | 24 | 37 |
+| Pipeline time | 35.7s | 47.7s |
+
+We locate nearly every building (96% centroid recall); boundary precision is limited in dense fabric (9.4% mask IoU) because SAM merges adjacent buildings into single masks. This is a mask boundary quality problem, not a detection failure. The identified fix is footprint regularisation (minAreaRect replacement where area/rect_area > 0.6).
+
+### Heights
+
+| Metric | Value |
+|--------|-------|
+| Median building height | 3.4 m (systematic underestimate — see below) |
+| Coverage | 37 borderline + 109 relative + 2 inferred + 19 failed of 167 |
+| Shadow coherence R (best crop) | 0.681 |
+
+### Per-stage Timing (crop2 at 512/12, warm)
+
+| Stage | Time |
+|-------|------|
+| SAM segmentation | 29.3s |
+| DAv2 depth inference | 13.2s |
+| Height estimation | 5.1s |
+| **Total** | **47.7s** |
 
 ### Honest Limitations
 
-- **Shadow truncation**: In dense urban areas (5-10m building spacing), shadows fall ON neighboring building roofs and are excluded by the shadow mask. This underestimates heights by 2-3x. Root cause: `shadow_candidate &= ~all_buildings` in shadow detection.
-- **SAM merges adjacent buildings**: IoU-based recall is 10-17% because SAM treats touching buildings as one mask. Centroid-based recall is much higher (96%).
+- **Shadow truncation in dense fabric**: `shadow_candidate &= ~all_buildings` (shadow_detection.py:71) excludes shadow pixels falling on neighbouring building roofs. In dense old city fabric (5-10m building spacing), a 10m building casts a 61px shadow but only ~20px falls on open ground — the rest lands on the next building's roof and is masked out. Measured shadow length is shorter than true length, producing ~3m instead of ~10m. This is the dominant error source.
+- **SAM merges adjacent buildings**: 96% centroid recall vs 9.4% mask IoU — we find buildings but don't separate touching ones. Footprint regularisation is the identified fix.
 - **Sun elevation is multiplicative**: All shadow-based heights scale as `tan(sun_elevation)`. A wrong elevation biases every height by the same factor.
 - **No ground truth available**: Antakya OSM has 324 buildings but only 8 with height/levels tags. GAMUS evaluator is ready but needs paired .h5 tiles.
 
 ## Resource Requirements
 
-- ~4 GB RAM (SAM ViT-B 375 MB + Depth Anything V2 99 MB + PyTorch overhead)
+- ~1.8 GB peak RAM (measured at 512/12)
 - CPU-only, no GPU required
 - Disk: ~600 MB for model weights
 
@@ -97,7 +123,7 @@ app/
   estimators/             Depth model backends (DA-V2, MiDaS, synthetic)
 
 static/
-  landing.html            Animated landing page with demo loader
+  landing.html            Landing page with demo scene preload
   index.html              3D viewer (Three.js r134, no build step)
 
 eval/

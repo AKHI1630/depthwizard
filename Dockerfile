@@ -12,15 +12,20 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 
 COPY app/ app/
 COPY static/ static/
-COPY models/ models/
-COPY data/demo/ data/demo/
+COPY eval/ eval/
+COPY scripts/ scripts/
+
+# Model weights download at startup (not baked in)
+# HF Spaces can reach huggingface.co; the laptop cannot.
+COPY download_models.py .
 
 ENV HF_HUB_DISABLE_XET=1
 ENV PYTHONUNBUFFERED=1
+ENV PORT=7860
 
-EXPOSE 8001
+EXPOSE 7860
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8001/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+    CMD curl -f http://localhost:7860/health || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
+CMD python download_models.py && uvicorn app.main:app --host 0.0.0.0 --port 7860

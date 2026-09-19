@@ -82,10 +82,12 @@
     <div class="method-line">Shadow-Based Photogrammetric Height Estimation</div>
     <div class="badge">SIH 26175 · Smart India Hackathon</div>
     <br>
-    <button id="btn-launch">LAUNCH WORKSPACE</button>
-    <div id="demo-section" style="margin-top:20px;display:none;">
-      <div style="font-size:11px;color:#5a7a9a;letter-spacing:0.08em;margin-bottom:8px;">DEMO EXAMPLES</div>
-      <div id="demo-list" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;"></div>
+    <div id="demo-section" style="margin-top:20px;">
+      <div style="font-size:11px;color:#5a7a9a;letter-spacing:0.08em;margin-bottom:12px;">SELECT A SCENE</div>
+      <div id="demo-list" style="display:flex;gap:12px;flex-wrap:wrap;justify-content:center;"></div>
+    </div>
+    <div style="margin-top:24px;">
+      <button id="btn-launch" style="opacity:0.6;font-size:12px;padding:6px 20px;">or upload your own image</button>
     </div>
   </div>
 </div>
@@ -292,7 +294,7 @@ function animate() {
 }
 animate();
 
-// Launch button
+// Launch button (upload your own)
 document.getElementById('btn-launch').addEventListener('click', () => {
   transitioning = true;
   transitionStart = performance.now() / 1000;
@@ -309,20 +311,26 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// Demo loader
-fetch('/demo/list').then(r => r.json()).then(d => {
-  if (!d.demos || d.demos.length === 0) return;
-  const sec = document.getElementById('demo-section');
+// Demo scene buttons from static manifest — no server call needed
+fetch('/demo/manifest.json').then(r => r.json()).then(scenes => {
+  if (!scenes || scenes.length === 0) return;
   const list = document.getElementById('demo-list');
-  sec.style.display = '';
-  d.demos.forEach(demo => {
+
+  scenes.forEach(s => {
     const btn = document.createElement('button');
-    btn.textContent = demo.name;
-    btn.style.cssText = 'pointer-events:auto;background:rgba(126,200,227,0.1);border:1px solid rgba(126,200,227,0.25);color:#8aa8c8;font-size:12px;padding:6px 16px;border-radius:3px;cursor:pointer;letter-spacing:0.04em;transition:background 0.2s;';
-    btn.addEventListener('mouseenter', () => { btn.style.background = 'rgba(126,200,227,0.2)'; });
-    btn.addEventListener('mouseleave', () => { btn.style.background = 'rgba(126,200,227,0.1)'; });
+    btn.textContent = s.label;
+    const isDefault = !!s.default;
+    btn.style.cssText = 'pointer-events:auto;background:' + (isDefault ? 'rgba(126,200,227,0.2)' : 'rgba(126,200,227,0.08)') +
+      ';border:2px solid rgba(126,200,227,' + (isDefault ? '0.6' : '0.25') +
+      ');color:#c8e8ff;font-size:14px;font-weight:500;padding:10px 24px;border-radius:4px;cursor:pointer;letter-spacing:0.04em;transition:background 0.2s,border-color 0.2s,transform 0.15s;';
+    btn.addEventListener('mouseenter', () => { btn.style.background = 'rgba(126,200,227,0.3)'; btn.style.transform = 'scale(1.03)'; });
+    btn.addEventListener('mouseleave', () => { btn.style.background = isDefault ? 'rgba(126,200,227,0.2)' : 'rgba(126,200,227,0.08)'; btn.style.transform = 'scale(1)'; });
     btn.addEventListener('click', () => {
-      window.location.href = '/index.html?demo=' + encodeURIComponent(demo.filename);
+      let url = '/index.html?demo=' + encodeURIComponent(s.id);
+      if (s.gsd) url += '&gsd=' + s.gsd;
+      if (s.sun_elevation) url += '&sun_el=' + s.sun_elevation;
+      if (s.sun_azimuth) url += '&sun_az=' + s.sun_azimuth;
+      window.location.href = url;
     });
     list.appendChild(btn);
   });

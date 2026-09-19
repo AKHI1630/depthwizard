@@ -1708,7 +1708,7 @@ document.getElementById('file-input').addEventListener('change', async () => {
           );
         } else {
           updateStatsReadout(
-            '<span class="sv">LOD1</span>' +
+            '<span style="color:#7ec8e3;font-weight:600;">LIVE INFERENCE</span>' +
             ' · <span class="sv">R=' + (shadowR != null ? shadowR.toFixed(2) : '?') + '</span>' +
             ' · <span class="sv">' + total + '</span> buildings' +
             ' · <span class="sv">' + measured + '</span> measured' +
@@ -2091,11 +2091,93 @@ document.getElementById('btn-flood-csv').addEventListener('click', () => {
 });
 
 // ─── Demo auto-load ─────────────────────────────────────────────────────────
-(function() {
+(async function() {
   const params = new URLSearchParams(window.location.search);
   const demoFile = params.get('demo');
   if (!demoFile) return;
-  document.getElementById('status').textContent = 'Loading demo: ' + demoFile + '…';
+
+  const gsd = params.get('gsd');
+  const sunEl = params.get('sun_el');
+  const sunAz = params.get('sun_az');
+  if (gsd) {
+    document.getElementById('gsd-slider').value = gsd;
+    document.getElementById('gsd-val').textContent = parseFloat(gsd).toFixed(2);
+  }
+  if (sunEl) {
+    document.getElementById('sun-elev-slider').value = sunEl;
+    document.getElementById('sun-elev-val').textContent = Math.round(parseFloat(sunEl)) + '°';
+  }
+
+  // Try precomputed results first (instant load, <2s)
+  const sceneId = demoFile.replace(/\.[^.]+$/, '').replace(/_pre$/, '');
+  try {
+    const [jsonResp, manifest] = await Promise.all([
+      fetch('/demo/' + sceneId + '.json'),
+      fetch('/demo/manifest.json').then(r => r.ok ? r.json() : []),
+    ]);
+    if (jsonResp.ok) {
+      const samData = await jsonResp.json();
+      const textureUrl = '/demo/' + sceneId + '.jpg';
+      document.getElementById('status').textContent = 'Loading precomputed demo…';
+      setPipelineBanner('Precomputed result — loaded instantly. Full pipeline took ' +
+        (samData._pipeline_time_s || '?') + 's when pre-computed.', 'ok');
+
+      window._animateBuildingRise = true;
+      const lod1Result = buildLOD1Scene(samData, textureUrl);
+      lod1Instances = samData.instances;
+
+      const cov = samData.coverage || {};
+      const measured = cov.directly_measured || 0;
+      const relative = cov.relative || 0;
+      const inferred = cov.inferred || 0;
+      const failed = cov.failed || 0;
+      const total = cov.total_buildings || 0;
+      const shadowR = cov.shadow_coherence_R;
+      const shadowOk = cov.shadow_reliable !== false;
+      const hs = samData.height_stats || {};
+
+      const sunInfo = samData.sun || {};
+      const srcLabels = {
+        'metadata': 'from product metadata',
+        'computed': 'computed (pysolar)',
+        'estimated': 'measured from shadows',
+        'user': 'estimated — user supplied',
+        'default': 'default (no source)',
+      };
+      document.getElementById('sun-source-label').textContent =
+        srcLabels[sunInfo.source] || sunInfo.source || 'unknown';
+
+      const covEl = document.getElementById('coverage-display');
+      if (!shadowOk) {
+        covEl.textContent = 'Shadow detection unreliable (R=' + (shadowR != null ? shadowR.toFixed(2) : '?') + ') — heights not metric · ' +
+          relative + ' relative · ' + failed + ' failed of ' + total;
+        covEl.style.color = '#e65100';
+      } else {
+        covEl.textContent = 'Measured: ' + measured + ' · Inferred: ' + inferred + ' · Failed: ' + failed + ' of ' + total + ' buildings';
+        if (shadowR != null) covEl.textContent += ' · R=' + shadowR.toFixed(2);
+        covEl.style.color = '';
+      }
+      document.getElementById('coverage-row').style.display = '';
+
+      updateStatsReadout(
+        '<span style="color:#4ac97e;font-weight:600;">PRECOMPUTED DEMO</span>' +
+        ' · <span class="sv">' + (samData._scene_label || sceneId) + '</span>' +
+        ' · <span class="sv">' + total + '</span> buildings' +
+        (shadowR != null ? ' · R=<span class="sv">' + shadowR.toFixed(2) + '</span>' : '') +
+        (hs.mean_m ? ' · mean <span class="sv">' + hs.mean_m.toFixed(1) + ' m</span>' : '') +
+        ' · pipeline was <span class="sv">' + (samData._pipeline_time_s || '?') + 's</span>'
+      );
+
+      document.getElementById('status').textContent =
+        'Demo: ' + lod1Result.buildings + ' buildings, ' + lod1Result.trees + ' trees (precomputed result)';
+      return;
+    }
+  } catch (e) {
+    console.log('[demo] No precomputed result, falling back to live pipeline:', e.message);
+  }
+
+  // Fallback: load the demo image and run full pipeline
+  document.getElementById('status').textContent = 'Loading demo: ' + demoFile + ' (live inference)…';
   fetch('/demo/' + encodeURIComponent(demoFile))
     .then(r => { if (!r.ok) throw new Error('Demo not found'); return r.blob(); })
     .then(blob => {
