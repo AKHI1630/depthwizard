@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu \
     && pip install --no-cache-dir -r requirements.txt
 
 COPY app/ app/
@@ -16,7 +16,6 @@ COPY eval/ eval/
 COPY scripts/ scripts/
 
 # Model weights download at startup (not baked in)
-# HF Spaces can reach huggingface.co; the laptop cannot.
 COPY download_models.py .
 
 ENV HF_HUB_DISABLE_XET=1
