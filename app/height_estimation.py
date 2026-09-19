@@ -294,8 +294,8 @@ def estimate_heights(
         from .shadow_detection import MIN_OFFSET_PX
         h_min = MIN_OFFSET_PX * gsd_m * np.tan(np.radians(resolved_sun.elevation_deg))
         shadow_feasibility = {
-            "h_min_m": round(h_min, 1),
-            "sun_elevation_deg": round(resolved_sun.elevation_deg, 1),
+            "h_min_m": round(float(h_min), 1),
+            "sun_elevation_deg": round(float(resolved_sun.elevation_deg), 1),
             "gsd_m": gsd_m,
             "min_offset_px": MIN_OFFSET_PX,
         }
@@ -509,9 +509,9 @@ def estimate_heights(
         "inferred": inferred,
         "failed": failed,
         "shadow_coherence_R": round(float(shadow_coherence_R), 3) if shadow_coherence_R is not None else None,
-        "shadow_reliable": shadow_reliable,
-        "shadow_borderline": shadow_borderline,
-        "shadow_p_combined": round(shadow_p_combined, 6) if shadow_p_combined is not None else None,
+        "shadow_reliable": bool(shadow_reliable),
+        "shadow_borderline": bool(shadow_borderline),
+        "shadow_p_combined": round(float(shadow_p_combined), 6) if shadow_p_combined is not None else None,
         "area_histogram_px": area_hist,
         "shadow_feasibility": shadow_feasibility,
     }
@@ -566,8 +566,8 @@ def height_result_to_json(result: HeightResult, image_width: int = 512, image_he
     heights = [i.height_m for i in buildings if i.height_m is not None]
 
     sun_dict = {
-        "elevation_deg": round(result.sun.elevation_deg, 1),
-        "azimuth_deg": round(result.sun.azimuth_deg, 1),
+        "elevation_deg": round(float(result.sun.elevation_deg), 1),
+        "azimuth_deg": round(float(result.sun.azimuth_deg), 1),
         "source": result.sun.source,
         "confidence": result.sun.confidence,
     }
@@ -581,9 +581,9 @@ def height_result_to_json(result: HeightResult, image_width: int = 512, image_he
             sun_dict["all_sources"]["computed"] = sl.computed
         if sl.measured_azimuth is not None:
             sun_dict["all_sources"]["measured_azimuth"] = {
-                "azimuth": sl.measured_azimuth,
-                "coherence_R": sl.measured_coherence_R,
-                "n_pairs": sl.measured_n_pairs,
+                "azimuth": float(sl.measured_azimuth),
+                "coherence_R": float(sl.measured_coherence_R) if sl.measured_coherence_R is not None else None,
+                "n_pairs": int(sl.measured_n_pairs) if sl.measured_n_pairs is not None else None,
             }
         if sl.slider:
             sun_dict["all_sources"]["slider"] = sl.slider
